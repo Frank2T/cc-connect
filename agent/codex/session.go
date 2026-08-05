@@ -33,6 +33,7 @@ type codexSession struct {
 	cmd            string   // CLI binary, default "codex"
 	cliExtraArgs   []string // extra args from cmd, prepended before exec args
 	extraEnv       []string
+	visionCfg      core.VisionSettings
 	promptPreamble string
 	events         chan core.Event
 	threadID       atomic.Value // stores string — Codex thread_id
@@ -87,7 +88,7 @@ func prependCodexPromptPreamble(prompt string, preamble string) string {
 	return "Before answering, follow these project-level instructions for this cc-connect session. They are not user content.\n\n" + preamble + "\n\n---\n\nUser message:\n" + prompt
 }
 
-func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string) (*codexSession, error) {
+func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string, visionCfg core.VisionSettings) (*codexSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{
@@ -100,6 +101,7 @@ func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, 
 		cmd:            cliBin,
 		cliExtraArgs:   cliExtraArgs,
 		extraEnv:       extraEnv,
+		visionCfg:      visionCfg,
 		promptPreamble: buildCodexPromptPreamble(systemPrompt, appendPrompt),
 		events:         make(chan core.Event, 64),
 		ctx:            sessionCtx,
@@ -180,6 +182,13 @@ func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment
 		return prompt, nil, nil
 	}
 
+	// Vision fallback: when the primary model cannot read images, describe them
+	// with the configured vision model and feed the text back instead of
+	// passing --image to a model that would reject it.
+	if cs.visionCfg.NeedsFallback(cs.model) {
+		return cs.describeImages(prompt, images)
+	}
+
 	imgDir := filepath.Join(cs.workDir, ".cc-connect", "images")
 	if err := os.MkdirAll(imgDir, 0o755); err != nil {
 		return "", nil, fmt.Errorf("codexSession: create image dir: %w", err)
@@ -201,6 +210,25 @@ func (cs *codexSession) stageImages(prompt string, images []core.ImageAttachment
 	}
 
 	return prompt, imagePaths, nil
+}
+
+// describeImages routes images through the configured vision model and merges
+// the resulting text description into the prompt.
+func (cs *codexSession) describeImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
+	if strings.TrimSpace(prompt) == "" {
+		prompt = "请按顺序详细描述这张图片的内容。"
+	}
+	desc, err := core.DescribeImages(cs.ctx, cs.visionCfg, prompt, images, 2048)
+	if err != nil {
+		return "", nil, fmt.Errorf("主模型 %s 不支持直接读图，视觉模型兜底失败: %w", cs.model, err)
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return desc, nil, nil
+	}
+	if len(images) > 1 {
+		return prompt + "\n\n[以下为视觉模型对用户所发图片的按序描述]\n" + desc, nil, nil
+	}
+	return prompt + "\n\n[以下为视觉模型对用户所发图片的描述]\n" + desc, nil, nil
 }
 
 func (cs *codexSession) buildExecArgs(prompt string, imagePaths []string) []string {

@@ -150,6 +150,7 @@ type appServerSession struct {
 	modelProvider  string
 	extraEnv       []string
 	codexHome      string
+	visionCfg      core.VisionSettings
 	promptPreamble string
 
 	events chan core.Event
@@ -191,7 +192,7 @@ const (
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, visionCfg core.VisionSettings) (*appServerSession, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
@@ -203,6 +204,7 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
 		modelProvider:    modelProvider,
 		extraEnv:         append([]string(nil), extraEnv...),
 		codexHome:        strings.TrimSpace(codexHome),
+		visionCfg:        visionCfg,
 		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
 		events:           make(chan core.Event, 128),
 		ctx:              sessionCtx,
@@ -516,6 +518,13 @@ func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachm
 		return prompt, nil, nil
 	}
 
+	// Vision fallback: when the primary model cannot read images, describe them
+	// with the configured vision model and feed the text back instead of
+	// passing localImage to a model that would reject it.
+	if s.visionCfg.NeedsFallback(s.model) {
+		return s.describeImages(prompt, images)
+	}
+
 	imgDir := filepath.Join(s.workDir, ".cc-connect", "images")
 	if err := os.MkdirAll(imgDir, 0o755); err != nil {
 		return "", nil, fmt.Errorf("codex app-server: create image dir: %w", err)
@@ -537,6 +546,22 @@ func (s *appServerSession) stageImages(prompt string, images []core.ImageAttachm
 	}
 
 	return prompt, imagePaths, nil
+}
+
+// describeImages routes images through the configured vision model and merges
+// the resulting text description into the prompt.
+func (s *appServerSession) describeImages(prompt string, images []core.ImageAttachment) (string, []string, error) {
+	if strings.TrimSpace(prompt) == "" {
+		prompt = "请按顺序详细描述这张图片的内容。"
+	}
+	desc, err := core.DescribeImages(s.ctx, s.visionCfg, prompt, images, 2048)
+	if err != nil {
+		return "", nil, fmt.Errorf("主模型 %s 不支持直接读图，视觉模型兜底失败: %w", s.model, err)
+	}
+	if len(images) > 1 {
+		return prompt + "\n\n[以下为视觉模型对用户所发图片的按序描述]\n" + desc, nil, nil
+	}
+	return prompt + "\n\n[以下为视觉模型对用户所发图片的描述]\n" + desc, nil, nil
 }
 
 func (s *appServerSession) RespondPermission(requestID string, result core.PermissionResult) error {
