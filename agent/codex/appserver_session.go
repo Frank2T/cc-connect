@@ -64,6 +64,15 @@ type turnStartResponse struct {
 	} `json:"turn"`
 }
 
+// turnSteerResponse decodes the turn/steer response. Different app-server
+// versions return either {"turn":{"id":"..."}} or {"turnId":"..."}.
+type turnSteerResponse struct {
+	TurnID string `json:"turnId"`
+	Turn   struct {
+		ID string `json:"id"`
+	} `json:"turn"`
+}
+
 type turnNotification struct {
 	ThreadID string `json:"threadId"`
 	Turn     struct {
@@ -190,6 +199,10 @@ type appServerSession struct {
 const (
 	appServerRequestTimeout      = 120 * time.Second
 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
+	// appServerControlTimeout bounds turn/interrupt and turn/steer RPCs. They
+	// only accept/ack input on a running turn and must not block as long as a
+	// full turn/start.
+	appServerControlTimeout = 30 * time.Second
 )
 
 func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, visionCfg core.VisionSettings) (*appServerSession, error) {
@@ -510,6 +523,72 @@ func (s *appServerSession) Send(prompt string, messageID string, images []core.I
 	s.pendingMsgs = s.pendingMsgs[:0]
 	s.stateMu.Unlock()
 
+	return nil
+}
+
+// CancelTurn interrupts the currently running turn via turn/interrupt while
+// keeping the app-server process and thread alive. Returns an error when
+// there is no active turn or the RPC fails.
+func (s *appServerSession) CancelTurn() error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return fmt.Errorf("codex app-server thread id is empty")
+	}
+	s.stateMu.Lock()
+	turnID := s.currentTurn
+	s.stateMu.Unlock()
+	if turnID == "" {
+		return fmt.Errorf("no active turn")
+	}
+	params := map[string]any{
+		"threadId": threadID,
+		"turnId":   turnID,
+	}
+	if err := s.requestWithTimeout("turn/interrupt", params, nil, appServerControlTimeout); err != nil {
+		return fmt.Errorf("codex app-server turn/interrupt: %w", err)
+	}
+	return nil
+}
+
+// SteerTurn injects additional text into the currently running turn via
+// turn/steer. The turn keeps running and the agent folds the input into its
+// current work; no new turn is started. Returns an error when there is no
+// active turn or the RPC fails.
+func (s *appServerSession) SteerTurn(input string) error {
+	if !s.alive.Load() {
+		return fmt.Errorf("session is closed")
+	}
+	threadID := s.CurrentSessionID()
+	if threadID == "" {
+		return fmt.Errorf("codex app-server thread id is empty")
+	}
+	s.stateMu.Lock()
+	turnID := s.currentTurn
+	s.stateMu.Unlock()
+	if turnID == "" {
+		return fmt.Errorf("no active turn")
+	}
+	params := map[string]any{
+		"threadId":       threadID,
+		"expectedTurnId": turnID,
+		"input": []map[string]any{
+			{"type": "text", "text": input},
+		},
+	}
+	var resp turnSteerResponse
+	if err := s.requestWithTimeout("turn/steer", params, &resp, appServerControlTimeout); err != nil {
+		return fmt.Errorf("codex app-server turn/steer: %w", err)
+	}
+	turnID = resp.TurnID
+	if turnID == "" {
+		turnID = resp.Turn.ID
+	}
+	if turnID == "" {
+		return fmt.Errorf("codex app-server turn/steer returned empty turn id")
+	}
 	return nil
 }
 

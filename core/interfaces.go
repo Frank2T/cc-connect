@@ -581,6 +581,15 @@ type AgentSessionCanceller interface {
 	CancelTurn() error
 }
 
+// AgentSessionSteerer is an optional interface for agent sessions that support
+// injecting additional text into the currently running turn without starting a
+// new one (app-server turn/steer). The engine uses it for high-priority
+// supplement messages (e.g. "/ps" or messages starting with "补充") while the
+// session is busy.
+type AgentSessionSteerer interface {
+	SteerTurn(input string) error
+}
+
 // CommandProvider is an optional interface for agents that expose custom slash
 // commands via local files (e.g. .claude/commands/*.md). The engine scans the
 // returned directories for *.md files and registers them as slash commands.

@@ -2967,12 +2967,19 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
 				goto sessionLocked
 			}
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
-			return
-		}
-		// Session is busy — try to queue the message for the running turn
-		// so the agent processes it immediately after the current turn ends.
-		if e.queueMessageForBusySession(p, msg, interactiveKey) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+		return
+	}
+	// High-priority triage: interrupt and supplement messages are routed to
+	// the running turn immediately (turn/interrupt / turn/steer) instead of
+	// waiting for the current task to finish. Ordinary messages fall through
+	// to the queue below.
+	if e.triageBusyMessage(p, msg, interactiveKey, session, sessions, agent, resolvedWorkspace) {
+		return
+	}
+	// Session is busy — try to queue the message for the running turn
+	// so the agent processes it immediately after the current turn ends.
+	if e.queueMessageForBusySession(p, msg, interactiveKey) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
 			// have just finished (session unlocked) between our TryLock failure
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
@@ -3091,6 +3098,14 @@ func (e *Engine) maybeAutoResetSessionOnIdle(p Platform, msg *Message, sessions 
 // the event loop sends it after the current turn's EventResult is received.
 // Returns true if the message was successfully queued, false otherwise.
 func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiveKey string) bool {
+	return e.queueMessageForBusySessionReply(p, msg, interactiveKey, e.i18n.T(MsgMessageQueued))
+}
+
+// queueMessageForBusySessionReply is queueMessageForBusySession with a custom
+// success reply text. High-priority triage paths use it so the user receives a
+// single, accurate reply (e.g. "interrupted, new instruction queued") instead
+// of the generic queue acknowledgement.
+func (e *Engine) queueMessageForBusySessionReply(p Platform, msg *Message, interactiveKey string, successReply string) bool {
 	e.interactiveMu.Lock()
 	state, hasState := e.interactiveStates[interactiveKey]
 	if !hasState || state == nil {
@@ -3156,8 +3171,119 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	e.reply(p, msg.ReplyCtx, successReply)
 	return true
+}
+
+// busyMessageClass describes how a message arriving while the session is busy
+// should be prioritized.
+type busyMessageClass int
+
+const (
+	busyMessageNormal busyMessageClass = iota
+	busyMessageInterrupt
+	busyMessageSupplement
+)
+
+// busyInterruptRe matches a message that starts with an interrupt signal. The
+// captured group is the instruction following the signal (empty when the
+// message is purely a stop command, e.g. "停" or "stop").
+var busyInterruptRe = regexp.MustCompile(`(?i)^(?:停一停|停一下|停下|停止|打断|打斷|先停|先别|先別|等等|等一等|等一下|等下|别做|別做|别干|別干|取消|停|halt|stop|interrupt|cancel)[\s!！。.,，:：]*(.*)$`)
+
+// busySupplementRe matches a message that starts with a supplement marker
+// (P.S. / "补充" / "另外" / "还有" / "追加" ...).
+var busySupplementRe = regexp.MustCompile(`(?i)^(?:补充|補充|补充一下|補充一下|另外|还有|還有|追加|此外|顺便|順便|再补充|再補充|ps[:：]?|p\.s\.?[:：]?)[\s:：,，]*`)
+
+// classifyBusyMessage detects interrupt and supplement intents in a message
+// that arrived while the session is busy. For interrupts it also returns the
+// instruction bundled after the stop word, if any.
+func classifyBusyMessage(content string) (busyMessageClass, string) {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return busyMessageNormal, ""
+	}
+	if m := busyInterruptRe.FindStringSubmatch(trimmed); m != nil {
+		return busyMessageInterrupt, strings.TrimSpace(m[1])
+	}
+	if busySupplementRe.MatchString(trimmed) {
+		return busyMessageSupplement, ""
+	}
+	return busyMessageNormal, ""
+}
+
+// triageBusyMessage handles high-priority messages (interrupts and supplements)
+// that arrive while the session is busy, instead of parking them behind the
+// current task like ordinary queued messages. It returns true when the message
+// was fully handled and must not be queued by the caller.
+func (e *Engine) triageBusyMessage(p Platform, msg *Message, interactiveKey string, session *Session, sessions *SessionManager, agent Agent, resolvedWorkspace string) bool {
+	content := strings.TrimSpace(msg.Content)
+	if content == "" || strings.HasPrefix(content, "/") || len(msg.Images) > 0 || msg.Audio != nil {
+		return false
+	}
+	cls, remainder := classifyBusyMessage(content)
+	if cls == busyMessageNormal {
+		return false
+	}
+
+	e.interactiveMu.Lock()
+	state, hasState := e.interactiveStates[interactiveKey]
+	if !hasState || state == nil {
+		e.interactiveMu.Unlock()
+		return false
+	}
+	state.mu.Lock()
+	e.interactiveMu.Unlock()
+	if state.agentSession == nil || !state.agentSession.Alive() {
+		state.mu.Unlock()
+		return false
+	}
+	sess := state.agentSession
+	state.mu.Unlock()
+
+	switch cls {
+	case busyMessageInterrupt:
+		canceller, ok := sess.(AgentSessionCanceller)
+		if !ok {
+			return false
+		}
+		if err := canceller.CancelTurn(); err != nil {
+			slog.Warn("busy triage: turn interrupt failed, falling back to queue",
+				"session", msg.SessionKey, "err", err)
+			return false
+		}
+		slog.Info("busy triage: interrupted current turn",
+			"session", msg.SessionKey, "user", msg.UserName)
+		if remainder == "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBusyInterrupted))
+			return true
+		}
+		// The user bundled a new instruction with the stop word. Queue the
+		// full message so the drain loop starts it as the next turn as soon
+		// as the interrupted turn reports completion.
+		if e.queueMessageForBusySessionReply(p, msg, interactiveKey, e.i18n.T(MsgBusyInterruptQueued)) {
+			if session.TryLock() {
+				go e.drainOrphanedQueue(session, sessions, interactiveKey, agent, resolvedWorkspace)
+			}
+		}
+		return true
+
+	case busyMessageSupplement:
+		steerer, ok := sess.(AgentSessionSteerer)
+		if !ok {
+			return false
+		}
+		if err := steerer.SteerTurn(content); err != nil {
+			slog.Warn("busy triage: steer failed, falling back to queue",
+				"session", msg.SessionKey, "err", err)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBusySteerFailed))
+			return false
+		}
+		slog.Info("busy triage: steered supplement into running turn",
+			"session", msg.SessionKey, "user", msg.UserName)
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBusySteered))
+		return true
+	}
+	return false
 }
 
 // ensureInteractiveStateForQueueing creates a placeholder interactiveState
@@ -6277,7 +6403,20 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsNoSession))
 		return
 	}
-	if err := state.agentSession.Send(text, "", nil, nil); err != nil {
+	// Prefer turn/steer so the supplement is injected into the running turn
+	// without starting a new one. Fall back to Send only for sessions that do
+	// not support steering.
+	steerer, ok := state.agentSession.(AgentSessionSteerer)
+	if !ok {
+		if err := state.agentSession.Send(text, "", nil, nil); err != nil {
+			slog.Error("ps: send failed", "error", err)
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
+			return
+		}
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+		return
+	}
+	if err := steerer.SteerTurn(text); err != nil {
 		slog.Error("ps: send failed", "error", err)
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSendFailed))
 		return

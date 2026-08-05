@@ -517,6 +517,10 @@ const (
 	MsgPsSendFailed      MsgKey = "ps_send_failed"
 	MsgPsEmpty           MsgKey = "ps_empty"
 	MsgPsNoSession       MsgKey = "ps_no_session"
+	MsgBusyInterrupted   MsgKey = "busy_interrupted"
+	MsgBusyInterruptQueued MsgKey = "busy_interrupt_queued"
+	MsgBusySteered       MsgKey = "busy_steered"
+	MsgBusySteerFailed   MsgKey = "busy_steer_failed"
 
 	MsgWhoamiTitle     MsgKey = "whoami_title"
 	MsgWhoamiCardTitle MsgKey = "whoami_card_title"
@@ -3372,6 +3376,34 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "目前沒有正在執行的任務。",
 		LangJapanese:           "現在実行中のタスクはありません。",
 		LangSpanish:            "No hay ninguna tarea en ejecución.",
+	},
+	MsgBusyInterrupted: {
+		LangEnglish:            "⏹ Interrupted the current task. Send your new instruction — it will be processed immediately.",
+		LangChinese:            "⏹ 已打断当前任务。请直接发送新指令，会立即处理。",
+		LangTraditionalChinese: "⏹ 已打斷目前任務。請直接傳送新指令，會立即處理。",
+		LangJapanese:           "⏹ 現在のタスクを中断しました。新しい指示を送ってください。すぐに処理します。",
+		LangSpanish:            "⏹ Tarea actual interrumpida. Envía tu nueva instrucción; se procesará de inmediato.",
+	},
+	MsgBusyInterruptQueued: {
+		LangEnglish:            "⏹ Interrupted the current task. Your new instruction is queued with priority and will run now.",
+		LangChinese:            "⏹ 已打断当前任务，你的新指令已进入优先队列，马上处理。",
+		LangTraditionalChinese: "⏹ 已打斷目前任務，你的新指令已進入優先佇列，馬上處理。",
+		LangJapanese:           "⏹ 現在のタスクを中断しました。新しい指示は優先キューに入り、すぐに処理されます。",
+		LangSpanish:            "⏹ Tarea interrumpida. Tu nueva instrucción está en cola prioritaria y se procesará ahora.",
+	},
+	MsgBusySteered: {
+		LangEnglish:            "✅ Supplement received — injected into the running task.",
+		LangChinese:            "✅ 已收到补充，已注入当前任务。",
+		LangTraditionalChinese: "✅ 已收到補充，已注入目前任務。",
+		LangJapanese:           "✅ 補足を受け取りました。実行中のタスクに注入しました。",
+		LangSpanish:            "✅ Suplemento recibido — inyectado en la tarea en curso.",
+	},
+	MsgBusySteerFailed: {
+		LangEnglish:            "❌ Could not inject the supplement into the running task.",
+		LangChinese:            "❌ 无法把补充注入当前任务。",
+		LangTraditionalChinese: "❌ 無法把補充注入目前任務。",
+		LangJapanese:           "❌ 補足を実行中のタスクに注入できませんでした。",
+		LangSpanish:            "❌ No se pudo inyectar el suplemento en la tarea en curso.",
 	},
 	MsgWhoamiTitle: {
 		LangEnglish:            "🪪 **Your Identity**",
