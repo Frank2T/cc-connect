@@ -134,7 +134,7 @@ func DescribeImages(ctx context.Context, cfg VisionSettings, prompt string, imag
 		prompt = "请按顺序详细描述这张图片的内容，包括文字、数字、界面元素与布局。"
 	}
 	if maxTokens <= 0 {
-		maxTokens = 2048
+		maxTokens = 8000
 	}
 
 	parts := make([]visionPart, 0, 1+len(images))
@@ -188,6 +188,7 @@ func DescribeImages(ctx context.Context, cfg VisionSettings, prompt string, imag
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
 
 		resp, err := client.Do(req)
 		if err != nil {
@@ -219,7 +220,9 @@ func DescribeImages(ctx context.Context, cfg VisionSettings, prompt string, imag
 		var parsed struct {
 			Choices []struct {
 				Message struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
 				} `json:"message"`
 			} `json:"choices"`
 		}
@@ -227,11 +230,22 @@ func DescribeImages(ctx context.Context, cfg VisionSettings, prompt string, imag
 			lastErr = fmt.Errorf("vision API 响应解析失败: %w", err)
 			continue
 		}
-		if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
+		text := ""
+		if len(parsed.Choices) > 0 {
+			m := parsed.Choices[0].Message
+			text = m.Content
+			if strings.TrimSpace(text) == "" {
+				text = m.ReasoningContent
+			}
+			if strings.TrimSpace(text) == "" {
+				text = m.Reasoning
+			}
+		}
+		if strings.TrimSpace(text) == "" {
 			lastErr = fmt.Errorf("vision API 返回内容为空")
 			continue
 		}
-		return strings.TrimSpace(parsed.Choices[0].Message.Content), nil
+		return strings.TrimSpace(text), nil
 	}
 	return "", lastErr
 }

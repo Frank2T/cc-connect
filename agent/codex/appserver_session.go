@@ -633,7 +633,7 @@ func (s *appServerSession) describeImages(prompt string, images []core.ImageAtta
 	if strings.TrimSpace(prompt) == "" {
 		prompt = "请按顺序详细描述这张图片的内容。"
 	}
-	desc, err := core.DescribeImages(s.ctx, s.visionCfg, prompt, images, 2048)
+	desc, err := core.DescribeImages(s.ctx, s.visionCfg, prompt, images, 8000)
 	if err != nil {
 		return "", nil, fmt.Errorf("主模型 %s 不支持直接读图，视觉模型兜底失败: %w", s.model, err)
 	}
