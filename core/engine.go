@@ -4824,6 +4824,8 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var lastRichCardLen int
 	var cardMessageID any
 	var partialText string
+	var toolCardMsgID any     // 工具进度卡片句柄 (Telegram 实时更新)
+	var toolCardLines []string // 工具进度卡片已追加行
 	triggerAutoCompress := false
 	pendingSend := sendDone
 
@@ -5269,18 +5271,41 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				}
 				toolMsg := fmt.Sprintf(e.i18n.T(MsgTool), toolCount, event.ToolName, formattedInput)
 				if !cp.AppendEvent(ProgressEntryToolUse, toolInput, event.ToolName, toolMsg) {
-					for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
-						sendWorkspace(p, replyCtx, chunk)
+					// 工具进度卡片模式: Telegram 等支持预览+更新的平台, 用一张卡片实时追加工具进度
+					if toolCardMsgID == nil {
+						if starter, ok := p.(PreviewStarter); ok && e.display.ToolMessages {
+							card := fmt.Sprintf("🔧 执行中...\n\n%s", toolMsg)
+							if h, err := starter.SendPreviewStart(e.ctx, replyCtx, card); err == nil && h != nil {
+								toolCardMsgID = h
+							}
+						}
+					}
+					if toolCardMsgID != nil {
+						if updater, ok := p.(MessageUpdater); ok {
+							_ = updater.UpdateMessage(e.ctx, toolCardMsgID, toolCardContent(toolCardLines, toolMsg))
+							toolCardLines = append(toolCardLines, toolMsg)
+						} else {
+							for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+								sendWorkspace(p, replyCtx, chunk)
+							}
+						}
+					} else {
+						for _, chunk := range SplitMessageCodeFenceAware(toolMsg, maxPlatformMessageLen) {
+							sendWorkspace(p, replyCtx, chunk)
+						}
 					}
 				}
 			}
 
 		case EventToolResult:
 			if e.display.ToolMessages {
-				result := strings.TrimSpace(event.ToolResult)
-				if result == "" {
-					result = strings.TrimSpace(event.Content)
+				resultFull := strings.TrimSpace(event.ToolResult)
+				if resultFull == "" {
+					resultFull = strings.TrimSpace(event.Content)
 				}
+				// result 截断版用于 ProgressCardEntry.Text (防膨胀);
+				// resultFull 完整版传给 formatToolResultEventFallback 做智能摘要提取
+				result := resultFull
 				if result != "" {
 					result = truncateIf(result, e.display.ToolMaxLen)
 				}
@@ -5316,6 +5341,14 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 					if !cp.AppendStructured(entry, resultMsg) {
 						if !SuppressStandaloneToolResultEvent(p) {
+							// 工具进度卡片模式: 结果也更新到卡片 (状态行实时变化)
+							if toolCardMsgID != nil {
+								if updater, ok := p.(MessageUpdater); ok {
+									_ = updater.UpdateMessage(e.ctx, toolCardMsgID, toolCardContent(toolCardLines, "✅ "+resultMsg))
+									toolCardLines = append(toolCardLines, "✅ "+resultMsg)
+									break
+								}
+							}
 							e.sendRaw(p, replyCtx, resultMsg)
 						}
 					}
@@ -5569,6 +5602,11 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 			cp.Finalize(ProgressCardStateCompleted)
+			// 自动记忆: 本 turn 用了工具 → 追加一行摘要到 MEMORY.md (避免下次重复测试)
+			// multi-workspace 下用 state.workspaceDir (当前工作区), 每个工作区独立记忆
+			if toolCount > 0 {
+				e.autoAppendToolMemory(session, toolCount, state.workspaceDir)
+			}
 			// Use state.agentSession.CurrentSessionID() instead of event.SessionID.
 			// event.SessionID may be empty in some cases, causing the agent_session_id
 			// to not be persisted to disk, breaking session resume on next startup.
@@ -6355,7 +6393,8 @@ var builtinCommands = []struct {
 	{[]string{"timer", "at", "remind"}, "timer"},
 	{[]string{"heartbeat", "hb"}, "heartbeat"},
 	{[]string{"compress", "compact"}, "compress"},
-	{[]string{"stop"}, "stop"},
+	{[]string{"stop", "interrupt"}, "stop"},
+	{[]string{"steer"}, "steer"},
 	{[]string{"cancel"}, "cancel"},
 	{[]string{"help"}, "help"},
 	{[]string{"version"}, "version"},
@@ -6589,8 +6628,12 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdCompress(p, msg)
 	case "stop":
 		e.cmdStop(p, msg)
+	case "interrupt":
+		e.cmdStop(p, msg)
 	case "cancel":
 		e.cmdCancel(p, msg)
+	case "steer":
+		e.cmdPs(p, msg, args)
 	case "help":
 		e.cmdHelp(p, msg)
 	case "start":
@@ -13909,6 +13952,88 @@ func (e *Engine) appendMemoryFile(p Platform, msg *Message, filePath, text strin
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgMemoryAdded), filePath))
 }
 
+// autoAppendToolMemory 在 turn 结束时自动把本次工具调用摘要追加到 MEMORY.md。
+// 目的: 每次"测过什么/验证过什么"都留痕, 下次同类任务直接引用, 避免重复测试。
+// 独立于 AGENTS.md (指令文件保持精简), 带行数上限防止膨胀。
+func (e *Engine) autoAppendToolMemory(session *Session, toolCount int, workspaceDir string) {
+	// 记忆文件: workspaceDir/MEMORY.md (与 AGENTS.md 分离, AGENTS.md 保持精简指令)
+	// multi-workspace: workspaceDir = 当前工作区, 每区独立记忆; 空则 fallback 全局 agent
+	memoryDir := strings.TrimSpace(workspaceDir)
+	if memoryDir == "" {
+		mp, ok := e.agent.(MemoryFileProvider)
+		if !ok {
+			return
+		}
+		filePath := mp.ProjectMemoryFile()
+		if filePath == "" {
+			return
+		}
+		memoryDir = filepath.Dir(filePath)
+	}
+	memoryPath := filepath.Join(memoryDir, "MEMORY.md")
+	// 任务摘要: 从会话历史取最后一条用户消息前 60 字
+	taskSummary := ""
+	if session != nil {
+		hist := session.GetHistory(0)
+		for i := len(hist) - 1; i >= 0; i-- {
+			if hist[i].Role == "user" && strings.TrimSpace(hist[i].Content) != "" {
+				taskSummary = truncateIf(strings.TrimSpace(hist[i].Content), 60)
+				break
+			}
+		}
+	}
+	if taskSummary == "" {
+		taskSummary = "(无任务描述)"
+	}
+	now := time.Now().Format("2006-01-02")
+	entry := fmt.Sprintf("- %s：调用 %d 次工具，任务：%s。验证/测试结论请优先查历史记录，避免重复测试。", now, toolCount, taskSummary)
+
+	dir := filepath.Dir(memoryPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		slog.Warn("auto memory: mkdir failed", "error", err)
+		return
+	}
+	// 读取现有内容; 同任务查重 (按任务摘要匹配, 替换旧条目而非无限追加)
+	var existing string
+	if b, err := os.ReadFile(memoryPath); err == nil {
+		existing = string(b)
+	}
+	lines := strings.Split(strings.TrimSpace(existing), "\n")
+	var kept []string
+	replaced := false
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) == "" {
+			continue
+		}
+		// 任务摘要匹配: 同一任务只留最新一条
+		if strings.Contains(ln, taskSummary) && strings.Contains(ln, "调用") {
+			if !replaced {
+				kept = append(kept, entry) // 用新条目替换旧条目
+				replaced = true
+			}
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	if !replaced {
+		kept = append(kept, entry)
+	}
+	// 行数上限: 超 300 行触发压缩 (合并为最新摘要, 而非丢数据)
+	const maxMemoryLines = 300
+	if len(kept) > maxMemoryLines {
+		// 保留最新 100 条 + 汇总行
+		summary := fmt.Sprintf("- 累计 %d 条工具记录 (整理于 %s)：历史结论已压缩，最新记录见下方。", len(kept), now)
+		tail := kept[len(kept)-100:]
+		kept = append([]string{summary}, tail...)
+	}
+	content := strings.Join(kept, "\n") + "\n"
+	if err := os.WriteFile(memoryPath, []byte(content), 0o644); err != nil {
+		slog.Warn("auto memory: write failed", "error", err)
+		return
+	}
+	slog.Info("auto memory: appended tool record", "tools", toolCount, "file", memoryPath)
+}
+
 // ──────────────────────────────────────────────────────────────
 // /cron command
 // ──────────────────────────────────────────────────────────────
@@ -15608,32 +15733,90 @@ func (e *Engine) formatToolResultEventFallback(toolName, result, status string, 
 			dot = "🔴"
 		}
 	}
-	var lines []string
-	first := "🧾"
+	// 单行摘要: 🧾 工具名 🟢/🔴 状态(退出码) — 结果摘要前 60 字
+	// 避免刷屏原始日志, 实时反馈每个工具的好坏
+	var sb strings.Builder
+	sb.WriteString("🧾")
 	if strings.TrimSpace(toolName) != "" {
-		first += " " + strings.TrimSpace(toolName)
+		sb.WriteString(" " + strings.TrimSpace(toolName))
 	}
-	lines = append(lines, first)
-	if strings.TrimSpace(status) != "" || success != nil {
-		s := strings.TrimSpace(status)
-		if s == "" {
-			if success != nil && *success {
-				s = e.i18n.T(MsgToolResultFmtOk)
-			} else if success != nil && !*success {
-				s = e.i18n.T(MsgToolResultFmtFailed)
-			}
+	s := strings.TrimSpace(status)
+	if s == "" {
+		if success != nil && *success {
+			s = e.i18n.T(MsgToolResultFmtOk)
+		} else if success != nil && !*success {
+			s = e.i18n.T(MsgToolResultFmtFailed)
 		}
-		lines = append(lines, fmt.Sprintf("%s %s: %s", dot, statusLabel, s))
 	}
+	sb.WriteString(fmt.Sprintf(" %s %s: %s", dot, statusLabel, s))
 	if exitCode != nil {
-		lines = append(lines, fmt.Sprintf("🔢 %s: %d", exitLabel, *exitCode))
+		sb.WriteString(fmt.Sprintf(" (%s %d)", exitLabel, *exitCode))
 	}
 	if strings.TrimSpace(result) != "" {
-		lines = append(lines, "```text\n"+strings.TrimSpace(result)+"\n```")
+		summary := extractToolSummary(result, 300)
+		sb.WriteString(" — " + summary)
 	} else {
-		lines = append(lines, "_"+noOutput+"_")
+		sb.WriteString(" — " + noOutput)
 	}
-	return strings.Join(lines, "\n")
+	return sb.String()
+}
+
+// extractToolSummary 从工具原始输出中智能提取一行摘要:
+// 1. 去掉 ANSI 颜色码/控制字符 (避免 [32;1m 乱码)
+// 2. 错误优先: 含 Error/Traceback/failed/异常 的行优先展示
+// 3. 尾部优先: 通常最后几行是结果/状态
+// 4. 单行截断 maxRunes
+func extractToolSummary(result string, maxRunes int) string {
+	// 清洗 ANSI 转义序列
+	ansiRe := regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+	clean := ansiRe.ReplaceAllString(result, "")
+	clean = strings.ReplaceAll(clean, "\n", "")
+	lines := strings.Split(clean, "\n")
+
+	var picked string
+	// 错误优先: 找含错误关键词的行
+	errKeywords := []string{"error", "traceback", "failed", "exception", "错误", "失败", "异常"}
+	for _, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if t == "" {
+			continue
+		}
+		lower := strings.ToLower(t)
+		for _, kw := range errKeywords {
+			if strings.Contains(lower, kw) {
+				picked = t
+				break
+			}
+		}
+		if picked != "" {
+			break
+		}
+	}
+	// 否则尾部优先: 从最后往前找第一个非空行
+	if picked == "" {
+		for i := len(lines) - 1; i >= 0; i-- {
+			t := strings.TrimSpace(lines[i])
+			if t != "" {
+				picked = t
+				break
+			}
+		}
+	}
+	if picked == "" {
+		return "(无输出)"
+	}
+	// 截断 (rune 安全)
+	if utf8.RuneCountInString(picked) > maxRunes {
+		runes := []rune(picked)
+		picked = string(runes[:maxRunes]) + "..."
+	}
+	return picked
+}
+
+// toolCardContent 把已追加行 + 新行合成卡片内容 (实时更新用)。
+func toolCardContent(prevLines []string, newLine string) string {
+	lines := append(append([]string{}, prevLines...), newLine)
+	return "🔧 执行中...\n\n" + strings.Join(lines, "\n")
 }
 
 // truncateIf truncates s to maxLen runes. 0 means no truncation.
