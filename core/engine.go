@@ -8657,6 +8657,16 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		}
 		modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
 		modeStr += e.i18n.Tf(MsgStatusToolMessages, toolStr)
+		iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
+		e.interactiveMu.Lock()
+		if st := e.interactiveStates[iKey]; st != nil {
+			state := "idle"
+			if st.agentSession != nil && st.agentSession.Alive() {
+				state = "running"
+			}
+			modeStr += fmt.Sprintf("\nTask: %s; queue: %d", state, len(st.pendingMessages))
+		}
+		e.interactiveMu.Unlock()
 
 		s := sessions.GetOrCreateActive(msg.SessionKey)
 		sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
@@ -9082,6 +9092,16 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 	}
 	modeStr += e.i18n.Tf(MsgStatusThinkingMessages, thinkingStr)
 	modeStr += e.i18n.Tf(MsgStatusToolMessages, toolStr)
+	iKey := e.interactiveKeyForSessionKey(sessionKey)
+	e.interactiveMu.Lock()
+	if st := e.interactiveStates[iKey]; st != nil {
+		state := "idle"
+		if st.agentSession != nil && st.agentSession.Alive() {
+			state = "running"
+		}
+		modeStr += fmt.Sprintf("\nTask: %s; queue: %d", state, len(st.pendingMessages))
+	}
+	e.interactiveMu.Unlock()
 
 	s := sessions.GetOrCreateActive(sessionKey)
 	sessionDisplayName := sessions.GetSessionName(s.GetAgentSessionID())
