@@ -132,6 +132,10 @@ const (
 	initialReconnectBackoff = time.Second
 	maxReconnectBackoff     = 30 * time.Second
 	stableConnectionWindow  = 10 * time.Second
+	// Telegram Bot API currently limits bot downloads to 20 MiB. Keep a
+	// defensive cap here as well so a malformed/proxied response cannot cause
+	// an unbounded allocation in io.ReadAll.
+	maxTelegramDownloadBytes = 20 << 20
 )
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -863,6 +867,28 @@ func (p *Platform) handleCallbackQuery(ctx context.Context, cb *models.CallbackQ
 		return
 	}
 
+	// Spoiler expand callbacks (spoil:expand) — 展开折叠的工具结果
+	if strings.HasPrefix(data, "spoil:") {
+		origText := msg.Text
+		// 去掉 <tg-spoiler> 标签恢复完整内容
+		fullText := strings.ReplaceAll(origText, "<tg-spoiler>", "")
+		fullText = strings.ReplaceAll(fullText, "</tg-spoiler>", "")
+		// 展开后按钮变 "🔼 已展开" (不可再点)
+		doneMarkup := &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+			{{Text: "🔼 已展开", CallbackData: "spoil:done"}},
+		}}
+		if _, err := bot.EditMessageText(ctx, &tgbot.EditMessageTextParams{
+			ChatID:      chatID,
+			MessageID:   msgID,
+			Text:        fullText,
+			ParseMode:   models.ParseModeHTML,
+			ReplyMarkup: doneMarkup,
+		}); err != nil {
+			slog.Debug("telegram: spoil expand edit failed", "error", err)
+		}
+		return
+	}
+
 	// AskUserQuestion callbacks (askq:qIdx:optIdx)
 	if strings.HasPrefix(data, "askq:") {
 		parts := strings.SplitN(data, ":", 3)
@@ -1046,12 +1072,24 @@ func (p *Platform) Reply(ctx context.Context, rctx any, content string) error {
 	}
 
 	html := core.MarkdownToSimpleHTML(content)
+	// 🧾 开头 = 工具结果消息 (sendRaw 路径)。结果超过阈值时尾部包 <tg-spoiler> 折叠,
+	// 状态行 (🧾/🟢/🔢) 保持可见, 点击展开看完整结果。
+	expanded := false
+	if strings.HasPrefix(strings.TrimSpace(content), "🧾") {
+		expanded = applySpoilerToToolResult(&html, toolResultSpoilerThreshold)
+	}
 	params := &tgbot.SendMessageParams{
 		ChatID:          rc.chatID,
 		MessageThreadID: rc.threadID,
 		Text:            html,
 		ParseMode:       models.ParseModeHTML,
 		ReplyParameters: &models.ReplyParameters{MessageID: rc.messageID},
+	}
+	// 折叠时带 "🔍 展开完整结果" 按钮 (callback: spoil:expand)
+	if expanded {
+		params.ReplyMarkup = &models.InlineKeyboardMarkup{InlineKeyboard: [][]models.InlineKeyboardButton{
+			{{Text: "🔍 展开完整结果", CallbackData: "spoil:expand"}},
+		}}
 	}
 
 	if _, err := bot.SendMessage(ctx, params); err != nil {
@@ -1365,7 +1403,18 @@ func (p *Platform) downloadFile(fileID string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download file %s: status %d", fileID, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	if resp.ContentLength > maxTelegramDownloadBytes {
+		return nil, fmt.Errorf("download file %s: size %d exceeds limit %d bytes", fileID, resp.ContentLength, maxTelegramDownloadBytes)
+	}
+	limited := io.LimitReader(resp.Body, maxTelegramDownloadBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("download file %s: %w", fileID, err)
+	}
+	if int64(len(data)) > maxTelegramDownloadBytes {
+		return nil, fmt.Errorf("download file %s exceeds limit %d bytes", fileID, maxTelegramDownloadBytes)
+	}
+	return data, nil
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
@@ -1817,3 +1866,36 @@ func sanitizeTelegramCommand(cmd string) string {
 }
 
 var _ core.AudioSender = (*Platform)(nil)
+
+// toolResultSpoilerThreshold: 工具结果内容超过该字符数时, 超出部分折叠为 <tg-spoiler>。
+// 状态行 (🧾/🟢/🔢) 保持可见, 点击展开看完整结果。
+const toolResultSpoilerThreshold = 200
+
+// applySpoilerToToolResult 把工具结果消息 HTML 中的长代码块内容包 <tg-spoiler>。
+// 结构: 🧾 工具名\n🟢 状态: xxx\n🔢 退出码: n\n<pre>...结果...</pre>
+// 只折叠 <pre> 块 (结果部分), 状态行不动。返回 true 表示发生了折叠。
+func applySpoilerToToolResult(html *string, threshold int) bool {
+	preOpen := "<pre>"
+	preClose := "</pre>"
+	orig := *html
+	start := strings.Index(orig, preOpen)
+	if start < 0 {
+		return false
+	}
+	contentStart := start + len(preOpen)
+	end := strings.Index(orig[contentStart:], preClose)
+	if end < 0 {
+		return false
+	}
+	contentEnd := contentStart + end
+	inner := orig[contentStart:contentEnd]
+	if utf8.RuneCountInString(inner) <= threshold {
+		return false
+	}
+	// 前 threshold 字符保持可见, 剩余包 spoiler
+	runes := []rune(inner)
+	visible := string(runes[:threshold])
+	spoiled := string(runes[threshold:])
+	*html = orig[:contentStart] + visible + "<tg-spoiler>" + spoiled + "</tg-spoiler>" + orig[contentEnd:]
+	return true
+}
