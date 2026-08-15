@@ -23,6 +23,27 @@ func MarkdownToSimpleHTML(md string) string {
 	inTable := false
 	var tblLines []string
 
+	renderCodeBlock := func(lang string, codeLines []string) {
+		code := strings.Join(codeLines, "\n")
+		// Telegram adds a prominent “copy code” affordance to <pre>. Keep
+		// short single-line snippets compact as inline <code>; reserve <pre>
+		// for genuinely multi-line or long listings where monospaced layout
+		// and one-tap copying are useful.
+		if len(codeLines) == 1 && utf8.RuneCountInString(code) <= 160 {
+			b.WriteString("<code>")
+			b.WriteString(escapeHTML(code))
+			b.WriteString("</code>")
+			return
+		}
+		b.WriteString("<pre><code")
+		if lang != "" {
+			b.WriteString(` class="language-` + escapeHTML(lang) + `"`)
+		}
+		b.WriteString(">")
+		b.WriteString(escapeHTML(code))
+		b.WriteString("</code></pre>")
+	}
+
 	// flushBlockquote merges buffered blockquote lines into a single <blockquote>.
 	// Supports Obsidian-style callouts: > [!type] Title
 	flushBlockquote := func() {
@@ -177,13 +198,7 @@ func MarkdownToSimpleHTML(md string) string {
 				codeLines = nil
 			} else {
 				inCodeBlock = false
-				if codeLang != "" {
-					b.WriteString("<pre><code class=\"language-" + escapeHTML(codeLang) + "\">")
-				} else {
-					b.WriteString("<pre><code>")
-				}
-				b.WriteString(escapeHTML(strings.Join(codeLines, "\n")))
-				b.WriteString("</code></pre>")
+				renderCodeBlock(codeLang, codeLines)
 				if i < len(lines)-1 {
 					b.WriteByte('\n')
 				}
@@ -261,9 +276,7 @@ func MarkdownToSimpleHTML(md string) string {
 		flushTable()
 	}
 	if inCodeBlock && len(codeLines) > 0 {
-		b.WriteString("<pre><code>")
-		b.WriteString(escapeHTML(strings.Join(codeLines, "\n")))
-		b.WriteString("</code></pre>")
+		renderCodeBlock(codeLang, codeLines)
 	}
 
 	return b.String()

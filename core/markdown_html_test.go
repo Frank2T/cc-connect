@@ -35,13 +35,37 @@ func TestMarkdownToSimpleHTML_InlineCode(t *testing.T) {
 }
 
 func TestMarkdownToSimpleHTML_CodeBlock(t *testing.T) {
-	md := "```go\nfmt.Println()\n```"
+	md := "```go\nfmt.Println()\nfmt.Println(\"done\")\n```"
 	out := MarkdownToSimpleHTML(md)
 	if !strings.Contains(out, `<pre><code class="language-go">`) {
 		t.Errorf("expected language-go code block, got %q", out)
 	}
 	if !strings.Contains(out, "fmt.Println()") {
 		t.Errorf("expected code content, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_ShortSingleLineCodeBlockIsCompact(t *testing.T) {
+	out := MarkdownToSimpleHTML("```bash\nnpm run build\n```")
+	if !strings.Contains(out, "<code>npm run build</code>") {
+		t.Errorf("short single-line code should use compact inline code, got %q", out)
+	}
+	if strings.Contains(out, "<pre>") {
+		t.Errorf("short single-line code should not create copy-code block, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_MultilineCodeBlockKeepsPre(t *testing.T) {
+	out := MarkdownToSimpleHTML("```python\nprint('a')\nprint('b')\n```")
+	if !strings.Contains(out, `<pre><code class="language-python">`) {
+		t.Errorf("multiline code should remain a pre block, got %q", out)
+	}
+}
+
+func TestMarkdownToSimpleHTML_LongSingleLineCodeBlockKeepsPre(t *testing.T) {
+	out := MarkdownToSimpleHTML("```\n" + strings.Repeat("x", 161) + "\n```")
+	if !strings.Contains(out, "<pre><code") {
+		t.Errorf("long single-line code should remain a pre block, got %q", out)
 	}
 }
 
@@ -321,7 +345,7 @@ func TestMarkdownToSimpleHTML_UnclosedCodeBlock(t *testing.T) {
 	if !strings.Contains(out, "print") {
 		t.Errorf("unclosed code block content should still appear, got %q", out)
 	}
-	if !strings.Contains(out, "<pre><code>") {
+	if !strings.Contains(out, "<pre><code") {
 		t.Errorf("unclosed code block should still get code tags, got %q", out)
 	}
 }
