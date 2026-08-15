@@ -25,23 +25,20 @@ func MarkdownToSimpleHTML(md string) string {
 
 	renderCodeBlock := func(lang string, codeLines []string) {
 		code := strings.Join(codeLines, "\n")
-		// Telegram adds a prominent “copy code” affordance to <pre>. Keep
-		// short single-line snippets compact as inline <code>; reserve <pre>
-		// for genuinely multi-line or long listings where monospaced layout
-		// and one-tap copying are useful.
+		// Telegram adds a prominent “copy code” affordance to <pre>. Ordinary
+		// model output should not become copy-code cards.
 		if len(codeLines) == 1 && utf8.RuneCountInString(code) <= 160 {
 			b.WriteString("<code>")
 			b.WriteString(escapeHTML(code))
 			b.WriteString("</code>")
 			return
 		}
-		b.WriteString("<pre><code")
 		if lang != "" {
-			b.WriteString(` class="language-` + escapeHTML(lang) + `"`)
+			b.WriteString("<i>")
+			b.WriteString(escapeHTML(lang))
+			b.WriteString(":</i>\n")
 		}
-		b.WriteString(">")
 		b.WriteString(escapeHTML(code))
-		b.WriteString("</code></pre>")
 	}
 
 	// flushBlockquote merges buffered blockquote lines into a single <blockquote>.
@@ -138,8 +135,7 @@ func MarkdownToSimpleHTML(md string) string {
 			}
 		}
 
-		// Render inside <pre>.
-		b.WriteString("<pre>")
+		// Render as ordinary text; <pre> triggers Telegram's copy-code UI.
 		first := true
 		for _, r := range rows {
 			if !first {
@@ -175,7 +171,6 @@ func MarkdownToSimpleHTML(md string) string {
 				}
 			}
 		}
-		b.WriteString("</pre>")
 		tblLines = tblLines[:0]
 		inTable = false
 	}

@@ -37,8 +37,8 @@ func TestMarkdownToSimpleHTML_InlineCode(t *testing.T) {
 func TestMarkdownToSimpleHTML_CodeBlock(t *testing.T) {
 	md := "```go\nfmt.Println()\nfmt.Println(\"done\")\n```"
 	out := MarkdownToSimpleHTML(md)
-	if !strings.Contains(out, `<pre><code class="language-go">`) {
-		t.Errorf("expected language-go code block, got %q", out)
+	if !strings.Contains(out, "<i>go:</i>") {
+		t.Errorf("expected language label, got %q", out)
 	}
 	if !strings.Contains(out, "fmt.Println()") {
 		t.Errorf("expected code content, got %q", out)
@@ -55,17 +55,17 @@ func TestMarkdownToSimpleHTML_ShortSingleLineCodeBlockIsCompact(t *testing.T) {
 	}
 }
 
-func TestMarkdownToSimpleHTML_MultilineCodeBlockKeepsPre(t *testing.T) {
+func TestMarkdownToSimpleHTML_MultilineCodeBlockAvoidsPre(t *testing.T) {
 	out := MarkdownToSimpleHTML("```python\nprint('a')\nprint('b')\n```")
-	if !strings.Contains(out, `<pre><code class="language-python">`) {
-		t.Errorf("multiline code should remain a pre block, got %q", out)
+	if strings.Contains(out, "<pre>") {
+		t.Errorf("multiline code should not create copy-code block, got %q", out)
 	}
 }
 
-func TestMarkdownToSimpleHTML_LongSingleLineCodeBlockKeepsPre(t *testing.T) {
+func TestMarkdownToSimpleHTML_LongSingleLineCodeBlockAvoidsPre(t *testing.T) {
 	out := MarkdownToSimpleHTML("```\n" + strings.Repeat("x", 161) + "\n```")
-	if !strings.Contains(out, "<pre><code") {
-		t.Errorf("long single-line code should remain a pre block, got %q", out)
+	if strings.Contains(out, "<pre>") {
+		t.Errorf("long single-line code should not create copy-code block, got %q", out)
 	}
 }
 
@@ -345,8 +345,8 @@ func TestMarkdownToSimpleHTML_UnclosedCodeBlock(t *testing.T) {
 	if !strings.Contains(out, "print") {
 		t.Errorf("unclosed code block content should still appear, got %q", out)
 	}
-	if !strings.Contains(out, "<pre><code") {
-		t.Errorf("unclosed code block should still get code tags, got %q", out)
+	if strings.Contains(out, "<pre>") {
+		t.Errorf("unclosed code block should not create copy-code block, got %q", out)
 	}
 }
 
@@ -372,8 +372,8 @@ func TestMarkdownToSimpleHTML_BlockquoteBreaksOnBlankLine(t *testing.T) {
 func TestMarkdownToSimpleHTML_Table(t *testing.T) {
 	md := "| Name | Age |\n|------|-----|\n| Alice | 30 |\n| Bob | 25 |"
 	out := MarkdownToSimpleHTML(md)
-	if !strings.Contains(out, "<pre>") {
-		t.Errorf("expected table wrapped in <pre>, got %q", out)
+	if strings.Contains(out, "<pre>") {
+		t.Errorf("table should not create copy-code block, got %q", out)
 	}
 	if !strings.Contains(out, "Name") || !strings.Contains(out, "Age") {
 		t.Errorf("expected table header cells, got %q", out)
@@ -393,8 +393,8 @@ func TestMarkdownToSimpleHTML_TableWithFormatting(t *testing.T) {
 	// tags — not as literal `**Header**` and friends.
 	md := "| **Header** | `code` |\n|---|---|\n| *italic* | normal |"
 	out := MarkdownToSimpleHTML(md)
-	if !strings.Contains(out, "<pre>") {
-		t.Errorf("expected table wrapped in <pre>, got %q", out)
+	if strings.Contains(out, "<pre>") {
+		t.Errorf("formatted table should not create copy-code block, got %q", out)
 	}
 	if !strings.Contains(out, "<b>Header</b>") {
 		t.Errorf("expected **Header** to render as <b>Header</b>, got %q", out)
