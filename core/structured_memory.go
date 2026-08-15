@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,20 @@ type StructuredMemory struct {
 	TurnsSinceCompact  int                   `json:"turns_since_compact"`
 	TokensSinceCompact int                   `json:"tokens_since_compact"`
 	Metadata           map[string]MemoryMeta `json:"metadata,omitempty"`
+	Records            []MemoryRecord        `json:"records,omitempty"`
+}
+type MemoryRecord struct {
+	ID         string     `json:"id"`
+	Kind       string     `json:"kind"`
+	Text       string     `json:"text"`
+	Scope      string     `json:"scope,omitempty"`
+	Source     string     `json:"source,omitempty"`
+	Confidence float64    `json:"confidence"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	Status     string     `json:"status"`
+	Tags       []string   `json:"tags,omitempty"`
 }
 type MemoryMeta struct {
 	Source     string     `json:"source,omitempty"`
@@ -57,8 +72,29 @@ func (s *StructuredMemoryStore) load() error {
 	if d.Chats == nil {
 		d.Chats = map[string]*StructuredMemory{}
 	}
+	for _, m := range d.Chats {
+		if m.Metadata == nil {
+			m.Metadata = map[string]MemoryMeta{}
+		}
+		m.migrateRecords()
+	}
 	s.data = d
 	return nil
+}
+func (m *StructuredMemory) migrateRecords() {
+	if len(m.Records) > 0 {
+		return
+	}
+	now := time.Now()
+	add := func(kind string, items []string) {
+		for i, text := range items {
+			m.Records = append(m.Records, MemoryRecord{ID: kind + "-" + strconv.Itoa(i+1), Kind: kind, Text: text, Scope: "session", Source: "legacy", Confidence: 0.7, CreatedAt: now, UpdatedAt: now, Status: "active"})
+		}
+	}
+	add("rule", m.DurableRules)
+	add("pref", m.Preferences)
+	add("decision", m.Decisions)
+	add("idea", m.SkillIdeas)
 }
 func cleanItems(in []string) []string {
 	seen := map[string]bool{}
@@ -126,6 +162,11 @@ func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 	}
 	if kind != "summary" {
 		m.Metadata[kind+"\x00"+text] = MemoryMeta{Source: "user_or_agent", Confidence: 0.8, UpdatedAt: time.Now()}
+		now := time.Now()
+		m.Records = append(m.Records, MemoryRecord{ID: kind + "-" + strconv.FormatInt(now.UnixNano(), 10), Kind: kind, Text: text, Scope: "session", Source: "user_or_agent", Confidence: 0.8, CreatedAt: now, UpdatedAt: now, Status: "active"})
+		if len(m.Records) > 120 {
+			m.Records = m.Records[len(m.Records)-120:]
+		}
 	}
 	m.UpdatedAt = time.Now()
 	return s.saveLocked()
