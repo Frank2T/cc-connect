@@ -264,9 +264,13 @@ type progressCardPayloadHintProvider interface {
 
 func progressStyleForTarget(p Platform, replyCtx any) string {
 	if hint, ok := replyCtx.(progressStyleHintProvider); ok {
-		return normalizeProgressStyle(hint.progressStyleHint())
+		style := normalizeProgressStyle(hint.progressStyleHint())
+		slog.Info("progress style from replyCtx hint", "style", style)
+		return style
 	}
-	return progressStyleForPlatform(p)
+	style := progressStyleForPlatform(p)
+	slog.Info("progress style from platform", "style", style)
+	return style
 }
 
 func progressCardPayloadForTarget(p Platform, replyCtx any) bool {
@@ -318,6 +322,7 @@ func newCompactProgressWriter(ctx context.Context, p Platform, replyCtx any, age
 	}
 	w.enabled = true
 	w.updater = updater
+	slog.Info("progress writer ENABLED", "platform", p.Name(), "style", w.style)
 	if starter, ok := p.(PreviewStarter); ok {
 		w.starter = starter
 	}
@@ -461,6 +466,7 @@ func (w *compactProgressWriter) AppendStructured(item ProgressCardEntry, fallbac
 			w.handle = handle
 			w.lastSent = w.content
 			w.lastUpdateAt = time.Now()
+			slog.Info("progress writer: preview started", "platform", w.platform.Name())
 			return true
 		}
 		callCtx, cancel := w.withAPITimeout()

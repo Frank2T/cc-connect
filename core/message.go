@@ -389,6 +389,7 @@ const (
 	EventError             EventType = "error"              // error occurred
 	EventPermissionRequest EventType = "permission_request" // agent requests permission via stdio protocol
 	EventThinking          EventType = "thinking"           // thinking/processing status
+	EventProgress          EventType = "progress"           // staged progress report (独立消息, 长任务分阶段汇报)
 )
 
 // UserQuestion represents a structured question from AskUserQuestion.

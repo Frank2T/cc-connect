@@ -515,6 +515,7 @@ type interactiveState struct {
 	stopped                  bool
 	pending                  *pendingPermission
 	pendingMessages          []queuedMessage // messages queued while session was busy
+	lastControlMessage       string         // latest interrupt/steer message for status display
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
 	sideText                 string
@@ -3238,6 +3239,7 @@ func (e *Engine) triageBusyMessage(p Platform, msg *Message, interactiveKey stri
 		return false
 	}
 	sess := state.agentSession
+	state.lastControlMessage = strings.TrimSpace(msg.Content)
 	state.mu.Unlock()
 
 	switch cls {
@@ -3280,6 +3282,9 @@ func (e *Engine) triageBusyMessage(p Platform, msg *Message, interactiveKey stri
 		}
 		slog.Info("busy triage: steered supplement into running turn",
 			"session", msg.SessionKey, "user", msg.UserName)
+		state.mu.Lock()
+		state.lastControlMessage = content
+		state.mu.Unlock()
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgBusySteered))
 		return true
 	}
@@ -6423,7 +6428,9 @@ var builtinCommands = []struct {
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 	text := strings.TrimSpace(strings.Join(args, " "))
 	if text == "" {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsEmpty))
+		// P2: /ps without arguments is a status inspection command.
+		// Keep /ps <text> as the backwards-compatible steer/supplement form.
+		e.cmdStatus(p, msg)
 		return
 	}
 	iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
@@ -8659,12 +8666,30 @@ func (e *Engine) cmdStatus(p Platform, msg *Message) {
 		modeStr += e.i18n.Tf(MsgStatusToolMessages, toolStr)
 		iKey := e.interactiveKeyForSessionKey(msg.SessionKey)
 		e.interactiveMu.Lock()
-		if st := e.interactiveStates[iKey]; st != nil {
-			state := "idle"
+		st := e.interactiveStates[iKey]
+		state, queueDepth, control := "idle", 0, ""
+		var queuePreview []string
+		if st != nil {
 			if st.agentSession != nil && st.agentSession.Alive() {
 				state = "running"
 			}
-			modeStr += fmt.Sprintf("\nTask: %s; queue: %d", state, len(st.pendingMessages))
+			st.mu.Lock()
+			control = strings.TrimSpace(st.lastControlMessage)
+			queueDepth = len(st.pendingMessages)
+			queuePreview = make([]string, 0, minInt(queueDepth, 3))
+			for i := 0; i < queueDepth && i < 3; i++ {
+				queuePreview = append(queuePreview, strings.TrimSpace(st.pendingMessages[i].content))
+			}
+			st.mu.Unlock()
+		}
+		modeStr += fmt.Sprintf("\nTask: %s; queue: %d", state, queueDepth)
+		if control != "" {
+			modeStr += "\nControl: " + control
+		}
+		for i, item := range queuePreview {
+			if item != "" {
+				modeStr += fmt.Sprintf("\nQueue %d: %s", i+1, item)
+			}
 		}
 		e.interactiveMu.Unlock()
 
@@ -9094,12 +9119,30 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 	modeStr += e.i18n.Tf(MsgStatusToolMessages, toolStr)
 	iKey := e.interactiveKeyForSessionKey(sessionKey)
 	e.interactiveMu.Lock()
-	if st := e.interactiveStates[iKey]; st != nil {
-		state := "idle"
+	st := e.interactiveStates[iKey]
+	state, queueDepth, control := "idle", 0, ""
+	var queuePreview []string
+	if st != nil {
 		if st.agentSession != nil && st.agentSession.Alive() {
 			state = "running"
 		}
-		modeStr += fmt.Sprintf("\nTask: %s; queue: %d", state, len(st.pendingMessages))
+		st.mu.Lock()
+		control = strings.TrimSpace(st.lastControlMessage)
+		queueDepth = len(st.pendingMessages)
+		queuePreview = make([]string, 0, minInt(queueDepth, 3))
+		for i := 0; i < queueDepth && i < 3; i++ {
+			queuePreview = append(queuePreview, strings.TrimSpace(st.pendingMessages[i].content))
+		}
+		st.mu.Unlock()
+	}
+	modeStr += fmt.Sprintf("\nTask: %s; queue: %d", state, queueDepth)
+	if control != "" {
+		modeStr += "\nControl: " + control
+	}
+	for i, item := range queuePreview {
+		if item != "" {
+			modeStr += fmt.Sprintf("\nQueue %d: %s", i+1, item)
+		}
 	}
 	e.interactiveMu.Unlock()
 
@@ -10262,6 +10305,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		// Mark eventsNeedResync so the next turn drains stale events from
 		// the cancelled turn before processing fresh input.
 		state.mu.Lock()
+		state.lastControlMessage = ""
 		state.eventsNeedResync = true
 		state.mu.Unlock()
 
@@ -10297,6 +10341,7 @@ normalCleanup:
 	} else {
 		state.mu.Lock()
 		state.pendingMessages = nil
+		state.lastControlMessage = ""
 		state.mu.Unlock()
 	}
 	e.closeAgentSessionAsync(sessionKey, agentSession)

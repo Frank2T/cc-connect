@@ -10072,7 +10072,7 @@ func TestCmdCompress_DrainsQueueAfterSuccess(t *testing.T) {
 
 // --- cmdPs ---
 
-func TestCmdPs_EmptyArgs_RepliesUsage(t *testing.T) {
+func TestCmdPs_EmptyArgs_RepliesStatus(t *testing.T) {
 	p := &stubPlatformEngine{n: "test"}
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
 
@@ -10080,8 +10080,8 @@ func TestCmdPs_EmptyArgs_RepliesUsage(t *testing.T) {
 	e.cmdPs(p, msg, nil)
 
 	sent := p.getSent()
-	if len(sent) == 0 || !strings.Contains(sent[0], e.i18n.T(MsgPsEmpty)) {
-		t.Fatalf("expected MsgPsEmpty, got %v", sent)
+	if len(sent) == 0 || !strings.Contains(sent[0], "Task: idle; queue: 0") {
+		t.Fatalf("expected idle status, got %v", sent)
 	}
 }
 

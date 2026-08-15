@@ -463,8 +463,10 @@ func (cs *codexSession) handleEvent(raw map[string]any) {
 	}
 }
 
-// flushPendingAsThinking emits all buffered agent_messages as EventThinking.
-func (cs *codexSession) flushPendingAsThinking() {
+// flushPendingAsProgress emits all buffered agent_messages as EventProgress,
+// so staged progress reports are delivered as independent immediate messages
+// instead of being folded into a thinking card or held until turn completion.
+func (cs *codexSession) flushPendingAsProgress() {
 	if cs.ctx.Err() != nil {
 		return
 	}
@@ -472,7 +474,7 @@ func (cs *codexSession) flushPendingAsThinking() {
 		if cs.ctx.Err() != nil {
 			return
 		}
-		evt := core.Event{Type: core.EventThinking, Content: text}
+		evt := core.Event{Type: core.EventProgress, Content: text}
 		select {
 		case cs.events <- evt:
 		case <-cs.ctx.Done():
@@ -523,7 +525,7 @@ func (cs *codexSession) handleItemStarted(raw map[string]any) {
 	}
 
 	// Any non-message item is a tool use; flush pending messages as thinking first.
-	cs.flushPendingAsThinking()
+	cs.flushPendingAsProgress()
 
 	switch itemType {
 	case "command_execution":
