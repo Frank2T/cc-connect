@@ -199,6 +199,20 @@ func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 	// 自动治理：同类且有明显词汇重叠但内容不同的旧记录标记为 conflict，
 	// 新记录保留为 active，避免旧规则与新规则同时伪装成无冲突事实。
 	now := time.Now()
+	// 同一条记忆再次被明确确认：强化原记录而不是重复追加。
+	for i := range m.Records {
+		r := &m.Records[i]
+		if r.Kind == kind && r.Status == "active" && strings.EqualFold(strings.TrimSpace(r.Text), text) {
+			r.Confidence += 0.1
+			if r.Confidence > 1 {
+				r.Confidence = 1
+			}
+			r.UpdatedAt = now
+			m.Metadata[kind+"\x00"+text] = MemoryMeta{Source: r.Source, Confidence: r.Confidence, UpdatedAt: now, ExpiresAt: r.ExpiresAt}
+			m.UpdatedAt = now
+			return s.saveLocked()
+		}
+	}
 	for i := range m.Records {
 		r := &m.Records[i]
 		if r.Kind == kind && r.Status == "active" &&
@@ -434,6 +448,12 @@ func (s *StructuredMemoryStore) RenderRelevant(key, query string) string {
 		active := make([]candidate, 0, len(items))
 		now := time.Now()
 		qtokens := memoryTokens(query)
+		confidence := map[string]float64{}
+		for _, r := range m.Records {
+			if r.Kind == kind && r.Status == "active" {
+				confidence[r.Text] = r.Confidence
+			}
+		}
 		for _, item := range items {
 			if len(m.Records) > 0 && !activeText[kind+"\x00"+item] {
 				continue
@@ -446,7 +466,11 @@ func (s *StructuredMemoryStore) RenderRelevant(key, query string) string {
 					continue
 				}
 			}
-			active = append(active, candidate{text: item, score: memorySimilarity(item, query)})
+			conf := confidence[item]
+			if conf == 0 {
+				conf = 0.7
+			}
+			active = append(active, candidate{text: item, score: memorySimilarity(item, query) * conf})
 		}
 		if len(active) > 0 {
 			sort.SliceStable(active, func(i, j int) bool { return active[i].score > active[j].score })
