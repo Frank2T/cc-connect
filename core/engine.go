@@ -13936,7 +13936,7 @@ func (e *Engine) cmdMemory(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sub := matchSubCommand(strings.ToLower(args[0]), []string{"add", "rule", "pref", "idea", "global", "show", "rules", "prefs", "ideas", "forget", "help"})
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{"add", "rule", "pref", "idea", "global", "show", "rules", "prefs", "ideas", "forget", "search", "help"})
 	if sub == "rule" || sub == "pref" || sub == "idea" {
 		if len(args) < 2 {
 			e.reply(p, msg.ReplyCtx, "用法：/memory rule|pref|idea <内容>")
@@ -13965,6 +13965,24 @@ func (e *Engine) cmdMemory(p Platform, msg *Message, args []string) {
 			return
 		}
 		e.reply(p, msg.ReplyCtx, sub+":\n- "+strings.Join(vals, "\n- "))
+		return
+	}
+	if sub == "search" {
+		q := strings.TrimSpace(strings.Join(args[1:], " "))
+		if q == "" {
+			e.reply(p, msg.ReplyCtx, "用法：/memory search <关键词>")
+			return
+		}
+		if e.structuredMemory == nil {
+			e.reply(p, msg.ReplyCtx, "结构化记忆不可用。")
+			return
+		}
+		result := e.structuredMemory.RenderRelevant(msg.SessionKey, q)
+		if result == "" {
+			e.reply(p, msg.ReplyCtx, "没有找到相关记忆。")
+		} else {
+			e.reply(p, msg.ReplyCtx, result)
+		}
 		return
 	}
 	if sub == "forget" {
@@ -16489,7 +16507,7 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey, channelKey string) string {
 	var prefix string
 	if e.structuredMemory != nil {
-		if mem := e.structuredMemory.Render(sessionKey); mem != "" {
+		if mem := e.structuredMemory.RenderRelevant(sessionKey, content); mem != "" {
 			prefix = "[cc-connect structured memory]\n" + mem + "\n[/cc-connect structured memory]\n"
 		}
 	}
