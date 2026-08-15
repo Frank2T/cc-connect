@@ -53,6 +53,11 @@ type StructuredMemoryStore struct {
 	data StructuredMemoryFile
 }
 
+const (
+	memoryMaintenanceInterval = 6 * time.Hour
+	memoryStaleAfter           = 30 * 24 * time.Hour
+)
+
 func NewStructuredMemoryStore(dir string) *StructuredMemoryStore {
 	if strings.TrimSpace(dir) == "" {
 		dir = "."
@@ -266,6 +271,45 @@ func (s *StructuredMemoryStore) PurgeExpired(key string) error {
 	}
 	return nil
 }
+
+// Maintain archives expired records and stale superseded/conflict records.
+// Records are retained for auditability; only their status changes.
+func (s *StructuredMemoryStore) Maintain() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	changed := false
+	for _, m := range s.data.Chats {
+		if m == nil {
+			continue
+		}
+		chatChanged := false
+		for i := range m.Records {
+			r := &m.Records[i]
+			if r.Status == "active" && r.ExpiresAt != nil && r.ExpiresAt.Before(now) {
+				r.Status = "archived"
+				r.UpdatedAt = now
+				changed = true
+				chatChanged = true
+				continue
+			}
+			if (r.Status == "conflict" || r.Status == "superseded") &&
+				!r.UpdatedAt.IsZero() && now.Sub(r.UpdatedAt) >= memoryStaleAfter {
+				r.Status = "archived"
+				r.UpdatedAt = now
+				changed = true
+				chatChanged = true
+			}
+		}
+		if chatChanged {
+			m.UpdatedAt = now
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return s.saveLocked()
+}
 func (s *StructuredMemoryStore) Forget(key, kind string, n int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -312,6 +356,12 @@ func (s *StructuredMemoryStore) Render(key string) string {
 
 func (s *StructuredMemoryStore) RenderRelevant(key, query string) string {
 	m := s.Get(key)
+	activeText := map[string]bool{}
+	for _, r := range m.Records {
+		if r.Status == "active" {
+			activeText[r.Kind+"\x00"+r.Text] = true
+		}
+	}
 	var b strings.Builder
 	if m.Summary != "" {
 		b.WriteString("summary: " + m.Summary + "\n")
@@ -321,6 +371,9 @@ func (s *StructuredMemoryStore) RenderRelevant(key, query string) string {
 		now := time.Now()
 		qtokens := memoryTokens(query)
 		for _, item := range items {
+			if len(m.Records) > 0 && !activeText[kind+"\x00"+item] {
+				continue
+			}
 			if meta, ok := m.Metadata[kind+"\x00"+item]; ok && meta.ExpiresAt != nil && meta.ExpiresAt.Before(now) {
 				continue
 			}

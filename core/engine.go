@@ -749,6 +749,24 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		memDir = filepath.Dir(memDir)
 	}
 	e.structuredMemory = NewStructuredMemoryStore(memDir)
+	// Run a lightweight memory maintenance pass at startup and periodically.
+	// The goroutine is bound to the engine context so watchdog restarts do not
+	// leave orphaned maintenance workers behind.
+	_ = e.structuredMemory.Maintain()
+	go func(store *StructuredMemoryStore, ctx context.Context) {
+		ticker := time.NewTicker(memoryMaintenanceInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				if err := store.Maintain(); err != nil {
+					slog.Warn("structured memory maintenance failed", "error", err)
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}(e.structuredMemory, e.ctx)
 
 	if ag != nil {
 		e.sessions.InvalidateForAgent(ag.Name())
