@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 type StructuredMemory struct {
@@ -170,6 +171,81 @@ func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 	}
 	m.UpdatedAt = time.Now()
 	return s.saveLocked()
+}
+
+func memoryTokens(text string) map[string]bool {
+	out := map[string]bool{}
+	for _, part := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune("，。！？；：,.!?;:", r) }) {
+		if len([]rune(part)) >= 2 {
+			out[part] = true
+		}
+	}
+	return out
+}
+
+// Conflicts returns active records of the same kind with substantial token overlap
+// but different text, allowing callers to ask for confirmation instead of silently overwriting.
+func (s *StructuredMemoryStore) Conflicts(key, kind, text string) []MemoryRecord {
+	m := s.Get(key)
+	want := memoryTokens(text)
+	var out []MemoryRecord
+	for _, r := range m.Records {
+		if r.Kind != kind || r.Status != "active" || strings.EqualFold(strings.TrimSpace(r.Text), strings.TrimSpace(text)) {
+			continue
+		}
+		hit := 0
+		for t := range memoryTokens(r.Text) {
+			if want[t] {
+				hit++
+			}
+		}
+		if hit >= 1 {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Promote changes a candidate record into durable active memory after confirmation.
+func (s *StructuredMemoryStore) Promote(key, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.data.Chats[key]
+	if m == nil {
+		return nil
+	}
+	for i := range m.Records {
+		if m.Records[i].ID == id {
+			m.Records[i].Status = "active"
+			m.Records[i].Confidence = 1
+			m.Records[i].UpdatedAt = time.Now()
+			return s.saveLocked()
+		}
+	}
+	return nil
+}
+
+// PurgeExpired archives expired records without deleting them.
+func (s *StructuredMemoryStore) PurgeExpired(key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.data.Chats[key]
+	if m == nil {
+		return nil
+	}
+	now := time.Now()
+	changed := false
+	for i := range m.Records {
+		if m.Records[i].ExpiresAt != nil && m.Records[i].ExpiresAt.Before(now) && m.Records[i].Status == "active" {
+			m.Records[i].Status = "archived"
+			changed = true
+		}
+	}
+	if changed {
+		m.UpdatedAt = now
+		return s.saveLocked()
+	}
+	return nil
 }
 func (s *StructuredMemoryStore) Forget(key, kind string, n int) error {
 	s.mu.Lock()
