@@ -397,6 +397,7 @@ type Engine struct {
 	baseWorkDir                  string
 	projectState                 *ProjectStateStore
 	structuredMemory             *StructuredMemoryStore
+	p7Agent                      *P7AgentManager
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -749,6 +750,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		memDir = filepath.Dir(memDir)
 	}
 	e.structuredMemory = NewStructuredMemoryStore(memDir)
+	e.p7Agent = NewP7AgentManager()
 	if mp, ok := e.agent.(MemoryFileProvider); ok {
 		_ = maintainWorkspaceMemoryFiles(filepath.Dir(mp.ProjectMemoryFile()))
 	}
@@ -6464,6 +6466,7 @@ var builtinCommands = []struct {
 	{[]string{"lang"}, "lang"},
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
+	{[]string{"agent"}, "agent"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
 	{[]string{"timer", "at", "remind"}, "timer"},
@@ -6540,6 +6543,19 @@ func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+}
+
+func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
+	if e.p7Agent == nil { e.p7Agent = NewP7AgentManager() }
+	if len(args) == 0 || strings.EqualFold(args[0], "status") {
+		e.reply(p, msg.ReplyCtx, e.p7Agent.Status(e.AgentTypeName()))
+		return
+	}
+	if err := e.p7Agent.SetRole(args[0]); err != nil {
+		e.reply(p, msg.ReplyCtx, err.Error()+"\n用法：/agent status|explorer|worker|reviewer")
+		return
+	}
+	e.reply(p, msg.ReplyCtx, e.p7Agent.Status(e.AgentTypeName())+"\n已切换，下一轮任务生效。")
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -6695,6 +6711,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdQuiet(p, msg, args)
 	case "provider":
 		e.cmdProvider(p, msg, args)
+	case "agent":
+		e.cmdAgent(p, msg, args)
 	case "memory":
 		e.cmdMemory(p, msg, args)
 	case "cron":
