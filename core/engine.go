@@ -749,6 +749,10 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		memDir = filepath.Dir(memDir)
 	}
 	e.structuredMemory = NewStructuredMemoryStore(memDir)
+	if mp, ok := e.agent.(MemoryFileProvider); ok {
+		_ = maintainWorkspaceMemoryFiles(filepath.Dir(mp.ProjectMemoryFile()))
+	}
+	_ = syncStructuredMemoryBackup(e.structuredMemory.path)
 	// Run a lightweight memory maintenance pass at startup and periodically.
 	// The goroutine is bound to the engine context so watchdog restarts do not
 	// leave orphaned maintenance workers behind.
@@ -761,6 +765,9 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 			case <-ticker.C:
 				if err := store.Maintain(); err != nil {
 					slog.Warn("structured memory maintenance failed", "error", err)
+				}
+				if err := syncStructuredMemoryBackup(store.path); err != nil {
+					slog.Warn("structured memory backup failed", "error", err)
 				}
 			case <-ctx.Done():
 				return
@@ -14220,7 +14227,10 @@ func (e *Engine) autoAppendToolMemory(session *Session, toolCount int, workspace
 		kept = append([]string{summary}, tail...)
 	}
 	content := strings.Join(kept, "\n") + "\n"
-	if err := os.WriteFile(memoryPath, []byte(content), 0o644); err != nil {
+	if err := backupFile(memoryPath); err != nil {
+		slog.Warn("auto memory: backup failed", "error", err)
+	}
+	if err := atomicWriteFile(memoryPath, []byte(content), 0o644); err != nil {
 		slog.Warn("auto memory: write failed", "error", err)
 		return
 	}
