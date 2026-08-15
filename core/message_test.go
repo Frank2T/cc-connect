@@ -316,12 +316,12 @@ func TestSaveFilesToDisk_NoSubdirBackwardsCompat(t *testing.T) {
 func TestAppendFileRefs_AbsolutizesRelativePaths(t *testing.T) {
 	// Mixed input: one absolute, one relative, one that is exactly ".".
 	in := []string{
-		"/tmp/explicit.txt",
+		filepath.Join(string(filepath.Separator), "tmp", "explicit.txt"),
 		"sub/dir/relative.txt",
 		".",
 	}
 	got := AppendFileRefs("see attached", in)
-	for _, want := range []string{"/tmp/explicit.txt"} {
+	for _, want := range []string{filepath.Join(string(filepath.Separator), "tmp", "explicit.txt")} {
 		if !strings.Contains(got, want) {
 			t.Errorf("AppendFileRefs dropped absolute path %q from prompt: %q", want, got)
 		}
@@ -369,7 +369,10 @@ func TestAppendFileRefs_AbsolutizesRelativePaths(t *testing.T) {
 // absolute paths are not rewritten (no extra syscalls, no normalization
 // surprises for callers who handed us a clean path).
 func TestAppendFileRefs_AbsoluteInputsPassthrough(t *testing.T) {
-	in := []string{"/already/abs/a.txt", "/already/abs/b.txt"}
+	in := []string{
+		filepath.Join(string(filepath.Separator), "already", "abs", "a.txt"),
+		filepath.Join(string(filepath.Separator), "already", "abs", "b.txt"),
+	}
 	got := AppendFileRefs("see attached", in)
 	for _, want := range in {
 		if !strings.Contains(got, want) {
