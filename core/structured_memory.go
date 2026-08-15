@@ -288,6 +288,10 @@ func (s *StructuredMemoryStore) AddTurn(key string, tokens int) error {
 	return s.saveLocked()
 }
 func (s *StructuredMemoryStore) Render(key string) string {
+	return s.RenderRelevant(key, "")
+}
+
+func (s *StructuredMemoryStore) RenderRelevant(key, query string) string {
 	m := s.Get(key)
 	var b strings.Builder
 	if m.Summary != "" {
@@ -296,9 +300,21 @@ func (s *StructuredMemoryStore) Render(key string) string {
 	renderItems := func(kind, title string, items []string) {
 		active := make([]string, 0, len(items))
 		now := time.Now()
+		qtokens := memoryTokens(query)
 		for _, item := range items {
 			if meta, ok := m.Metadata[kind+"\x00"+item]; ok && meta.ExpiresAt != nil && meta.ExpiresAt.Before(now) {
 				continue
+			}
+			if len(qtokens) > 0 {
+				hit := 0
+				for t := range memoryTokens(item) {
+					if qtokens[t] {
+						hit++
+					}
+				}
+				if hit == 0 {
+					continue
+				}
 			}
 			active = append(active, item)
 		}
