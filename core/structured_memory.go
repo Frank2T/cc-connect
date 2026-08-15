@@ -10,15 +10,22 @@ import (
 )
 
 type StructuredMemory struct {
-	Summary            string    `json:"summary,omitempty"`
-	DurableRules       []string  `json:"durable_rules,omitempty"`
-	Preferences        []string  `json:"preferences,omitempty"`
-	Decisions          []string  `json:"decisions,omitempty"`
-	SkillIdeas         []string  `json:"skill_ideas,omitempty"`
-	UpdatedAt          time.Time `json:"updated_at"`
-	CompactedAt        time.Time `json:"compacted_at"`
-	TurnsSinceCompact  int       `json:"turns_since_compact"`
-	TokensSinceCompact int       `json:"tokens_since_compact"`
+	Summary            string                `json:"summary,omitempty"`
+	DurableRules       []string              `json:"durable_rules,omitempty"`
+	Preferences        []string              `json:"preferences,omitempty"`
+	Decisions          []string              `json:"decisions,omitempty"`
+	SkillIdeas         []string              `json:"skill_ideas,omitempty"`
+	UpdatedAt          time.Time             `json:"updated_at"`
+	CompactedAt        time.Time             `json:"compacted_at"`
+	TurnsSinceCompact  int                   `json:"turns_since_compact"`
+	TokensSinceCompact int                   `json:"tokens_since_compact"`
+	Metadata           map[string]MemoryMeta `json:"metadata,omitempty"`
+}
+type MemoryMeta struct {
+	Source     string     `json:"source,omitempty"`
+	Confidence float64    `json:"confidence,omitempty"`
+	UpdatedAt  time.Time  `json:"updated_at,omitempty"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 }
 type StructuredMemoryFile struct {
 	Chats map[string]*StructuredMemory `json:"chats"`
@@ -44,7 +51,7 @@ func (s *StructuredMemoryStore) load() error {
 		return err
 	}
 	var d StructuredMemoryFile
-	if json.Unmarshal(b, &d) != nil {
+	if err := json.Unmarshal(b, &d); err != nil {
 		return err
 	}
 	if d.Chats == nil {
@@ -58,10 +65,11 @@ func cleanItems(in []string) []string {
 	out := []string{}
 	for _, v := range in {
 		v = strings.TrimSpace(v)
-		if v == "" || len([]rune(v)) > 500 || seen[v] || strings.Contains(strings.ToLower(v), "api_key") || strings.Contains(strings.ToLower(v), "token=") {
+		norm := strings.ToLower(strings.Join(strings.Fields(v), " "))
+		if v == "" || len([]rune(v)) > 500 || seen[norm] || strings.Contains(strings.ToLower(v), "api_key") || strings.Contains(strings.ToLower(v), "token=") || strings.Contains(strings.ToLower(v), "authorization:") {
 			continue
 		}
-		seen[v] = true
+		seen[norm] = true
 		out = append(out, v)
 	}
 	if len(out) > 30 {
@@ -98,8 +106,11 @@ func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 	defer s.mu.Unlock()
 	m := s.data.Chats[key]
 	if m == nil {
-		m = &StructuredMemory{}
+		m = &StructuredMemory{Metadata: map[string]MemoryMeta{}}
 		s.data.Chats[key] = m
+	}
+	if m.Metadata == nil {
+		m.Metadata = map[string]MemoryMeta{}
 	}
 	switch kind {
 	case "rule":
@@ -112,6 +123,9 @@ func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 		m.Decisions = cleanItems(append(m.Decisions, text))
 	case "summary":
 		m.Summary = text
+	}
+	if kind != "summary" {
+		m.Metadata[kind+"\x00"+text] = MemoryMeta{Source: "user_or_agent", Confidence: 0.8, UpdatedAt: time.Now()}
 	}
 	m.UpdatedAt = time.Now()
 	return s.saveLocked()
@@ -135,6 +149,9 @@ func (s *StructuredMemoryStore) Forget(key, kind string, n int) error {
 		p = &m.Decisions
 	}
 	if p != nil && n > 0 && n <= len(*p) {
+		if m.Metadata != nil {
+			delete(m.Metadata, kind+"\x00"+(*p)[n-1])
+		}
 		*p = append((*p)[:n-1], (*p)[n:]...)
 	}
 	m.UpdatedAt = time.Now()
@@ -145,7 +162,7 @@ func (s *StructuredMemoryStore) AddTurn(key string, tokens int) error {
 	defer s.mu.Unlock()
 	m := s.data.Chats[key]
 	if m == nil {
-		m = &StructuredMemory{}
+		m = &StructuredMemory{Metadata: map[string]MemoryMeta{}}
 		s.data.Chats[key] = m
 	}
 	m.TurnsSinceCompact++
@@ -159,12 +176,23 @@ func (s *StructuredMemoryStore) Render(key string) string {
 	if m.Summary != "" {
 		b.WriteString("summary: " + m.Summary + "\n")
 	}
-	if len(m.DurableRules) > 0 {
-		b.WriteString("durable rules:\n- " + strings.Join(m.DurableRules, "\n- ") + "\n")
+	renderItems := func(kind, title string, items []string) {
+		active := make([]string, 0, len(items))
+		now := time.Now()
+		for _, item := range items {
+			if meta, ok := m.Metadata[kind+"\x00"+item]; ok && meta.ExpiresAt != nil && meta.ExpiresAt.Before(now) {
+				continue
+			}
+			active = append(active, item)
+		}
+		if len(active) > 0 {
+			b.WriteString(title + ":\n- " + strings.Join(active, "\n- ") + "\n")
+		}
 	}
-	if len(m.Preferences) > 0 {
-		b.WriteString("preferences:\n- " + strings.Join(m.Preferences, "\n- ") + "\n")
-	}
+	renderItems("rule", "durable rules", m.DurableRules)
+	renderItems("pref", "preferences", m.Preferences)
+	renderItems("decision", "decisions", m.Decisions)
+	renderItems("idea", "skill ideas", m.SkillIdeas)
 	if b.Len() > 3500 {
 		return b.String()[:3500]
 	}
