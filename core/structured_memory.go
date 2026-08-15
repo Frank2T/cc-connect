@@ -225,7 +225,12 @@ func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 				}
 			}
 			if hit >= 2 {
-				r.Status = "conflict"
+				if explicitCorrection(text) {
+					r.Status = "superseded"
+					r.Confidence *= 0.5
+				} else {
+					r.Status = "conflict"
+				}
 				r.UpdatedAt = now
 			}
 		}
@@ -279,6 +284,16 @@ func memorySimilarity(a, b string) float64 {
 		return 0
 	}
 	return float64(hit) / float64(union)
+}
+
+func explicitCorrection(text string) bool {
+	t := strings.TrimSpace(strings.ToLower(text))
+	for _, p := range []string{"不是", "错了", "改成", "应该是", "以后用", "更正为", "纠正为", "wrong", "change to"} {
+		if strings.HasPrefix(t, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Conflicts returns active records of the same kind with substantial token overlap
