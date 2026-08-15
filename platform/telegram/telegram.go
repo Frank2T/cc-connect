@@ -462,6 +462,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		imgData, err := p.downloadFile(best.FileID)
 		if err != nil {
 			slog.Error("telegram: download photo failed", "error", err)
+			_ = p.Reply(ctx, rctx, attachmentDownloadError("图片", err))
 			return
 		}
 		caption := stripBotMention(msg.Caption, botName)
@@ -482,6 +483,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		audioData, err := p.downloadFile(msg.Voice.FileID)
 		if err != nil {
 			slog.Error("telegram: download voice failed", "error", err)
+			_ = p.Reply(ctx, rctx, attachmentDownloadError("语音", err))
 			return
 		}
 		p.dispatchMessage(&core.Message{
@@ -505,6 +507,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		audioData, err := p.downloadFile(msg.Audio.FileID)
 		if err != nil {
 			slog.Error("telegram: download audio failed", "error", err)
+			_ = p.Reply(ctx, rctx, attachmentDownloadError("音频", err))
 			return
 		}
 		format := "mp3"
@@ -535,6 +538,7 @@ func (p *Platform) handleMessage(ctx context.Context, msg *models.Message) {
 		fileData, err := p.downloadFile(msg.Document.FileID)
 		if err != nil {
 			slog.Error("telegram: download document failed", "error", err)
+			_ = p.Reply(ctx, rctx, attachmentDownloadError("文件", err))
 			return
 		}
 		caption := stripBotMention(msg.Caption, botName)
@@ -1415,6 +1419,17 @@ func (p *Platform) downloadFile(fileID string) ([]byte, error) {
 		return nil, fmt.Errorf("download file %s exceeds limit %d bytes", fileID, maxTelegramDownloadBytes)
 	}
 	return data, nil
+}
+
+func attachmentDownloadError(kind string, err error) string {
+	msg := fmt.Sprintf("❌ %s下载失败。", kind)
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "exceeds limit") || strings.Contains(lower, "exceeds") {
+		msg = fmt.Sprintf("❌ %s超过 Telegram 20 MiB 下载上限，请压缩后重试。", kind)
+	} else if strings.Contains(lower, "status 4") || strings.Contains(lower, "status 5") {
+		msg = fmt.Sprintf("❌ %s下载失败（Telegram 返回 %s），请稍后重试。", kind, err.Error())
+	}
+	return msg
 }
 
 func (p *Platform) ReconstructReplyCtx(sessionKey string) (any, error) {
