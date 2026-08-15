@@ -26,20 +26,20 @@ type StructuredMemory struct {
 	Records            []MemoryRecord        `json:"records,omitempty"`
 }
 type MemoryRecord struct {
-	ID         string     `json:"id"`
-	Kind       string     `json:"kind"`
-	Text       string     `json:"text"`
-	Scope      string     `json:"scope,omitempty"`
-	Source     string     `json:"source,omitempty"`
-	Confidence float64    `json:"confidence"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
-	Status     string     `json:"status"`
-	Tags       []string   `json:"tags,omitempty"`
-	Abstract   string     `json:"abstract,omitempty"`
-	Overview   string     `json:"overview,omitempty"`
-	ReferenceCount int    `json:"reference_count,omitempty"`
+	ID               string     `json:"id"`
+	Kind             string     `json:"kind"`
+	Text             string     `json:"text"`
+	Scope            string     `json:"scope,omitempty"`
+	Source           string     `json:"source,omitempty"`
+	Confidence       float64    `json:"confidence"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	ExpiresAt        *time.Time `json:"expires_at,omitempty"`
+	Status           string     `json:"status"`
+	Tags             []string   `json:"tags,omitempty"`
+	Abstract         string     `json:"abstract,omitempty"`
+	Overview         string     `json:"overview,omitempty"`
+	ReferenceCount   int        `json:"reference_count,omitempty"`
 	LastReferencedAt *time.Time `json:"last_referenced_at,omitempty"`
 }
 type MemoryMeta struct {
@@ -90,7 +90,7 @@ func (m *StructuredMemory) rebuildProjections() {
 
 const (
 	memoryMaintenanceInterval = 6 * time.Hour
-	memoryStaleAfter           = 30 * 24 * time.Hour
+	memoryStaleAfter          = 30 * 24 * time.Hour
 )
 
 func NewStructuredMemoryStore(dir string) *StructuredMemoryStore {
@@ -459,6 +459,95 @@ func (s *StructuredMemoryStore) AddTurn(key string, tokens int) error {
 }
 func (s *StructuredMemoryStore) Render(key string) string {
 	return s.RenderRelevant(key, "")
+}
+
+// RenderSearch renders structured-memory records for human-facing commands
+// such as Telegram's /memory search. Unlike RenderRelevant (used as prompt
+// context), this includes auditable metadata for each matching record.
+func (s *StructuredMemoryStore) RenderSearch(key, query string) string {
+	s.touchReferences(key)
+	m := s.Get(key)
+	qtokens := memoryTokens(query)
+	type candidate struct {
+		record MemoryRecord
+		score  float64
+	}
+	var matches []candidate
+	for _, r := range m.Records {
+		if r.Status != "active" {
+			continue
+		}
+		score := memorySimilarity(r.Text, query)
+		if len(qtokens) > 0 && score == 0 {
+			continue
+		}
+		if len(qtokens) == 0 {
+			score = 1
+		}
+		matches = append(matches, candidate{record: r, score: score * r.Confidence})
+	}
+	sort.SliceStable(matches, func(i, j int) bool {
+		if matches[i].score == matches[j].score {
+			return matches[i].record.UpdatedAt.After(matches[j].record.UpdatedAt)
+		}
+		return matches[i].score > matches[j].score
+	})
+	if len(matches) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("记忆检索")
+	if strings.TrimSpace(query) != "" {
+		b.WriteString("（" + strings.TrimSpace(query) + "）")
+	}
+	b.WriteString("：\n")
+	for i, c := range matches {
+		r := c.record
+		updated := r.UpdatedAt
+		if updated.IsZero() {
+			updated = r.CreatedAt
+		}
+		b.WriteString(strconv.Itoa(i+1) + ". ")
+		b.WriteString(updated.Format("2006-01-02 15:04"))
+		b.WriteString(" | 类型: " + memoryKindLabel(r.Kind))
+		b.WriteString(" | 置信度: " + strconv.Itoa(int(r.Confidence*100+0.5)) + "%")
+		b.WriteString(" | 状态: " + memoryStatusLabel(r.Status) + "\n")
+		b.WriteString("   " + r.Text + "\n")
+	}
+	if b.Len() > 3500 {
+		return b.String()[:3500] + "\n…（结果已截断）"
+	}
+	return b.String()
+}
+
+func memoryKindLabel(kind string) string {
+	switch kind {
+	case "rule":
+		return "规则"
+	case "pref":
+		return "偏好"
+	case "decision":
+		return "决策"
+	case "idea":
+		return "技能想法"
+	default:
+		return kind
+	}
+}
+
+func memoryStatusLabel(status string) string {
+	switch status {
+	case "active":
+		return "有效"
+	case "conflict":
+		return "冲突"
+	case "superseded":
+		return "已替代"
+	case "archived":
+		return "已归档"
+	default:
+		return status
+	}
 }
 
 func (s *StructuredMemoryStore) touchReferences(key string) {

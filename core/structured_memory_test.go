@@ -38,3 +38,14 @@ func TestStructuredMemoryDedupAndSecretFilter(t *testing.T) {
 		t.Fatalf("unexpected prefs: %#v", m.Preferences)
 	}
 }
+
+func TestStructuredMemorySearchReadableOutput(t *testing.T) {
+	s := NewStructuredMemoryStore(t.TempDir())
+	_ = s.Add("k", "rule", "用中文回答")
+	out := s.RenderSearch("k", "用中文回答")
+	for _, want := range []string{"记忆检索", "类型: 规则", "置信度:", "状态: 有效", "用中文回答"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("search output missing %q: %s", want, out)
+		}
+	}
+}

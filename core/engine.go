@@ -14033,7 +14033,7 @@ func (e *Engine) cmdMemory(p Platform, msg *Message, args []string) {
 			e.reply(p, msg.ReplyCtx, "结构化记忆不可用。")
 			return
 		}
-		result := e.structuredMemory.RenderRelevant(msg.SessionKey, q)
+		result := e.structuredMemory.RenderSearch(msg.SessionKey, q)
 		if result == "" {
 			e.reply(p, msg.ReplyCtx, "没有找到相关记忆。")
 		} else {
