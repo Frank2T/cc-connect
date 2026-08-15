@@ -39,6 +39,8 @@ type MemoryRecord struct {
 	Tags       []string   `json:"tags,omitempty"`
 	Abstract   string     `json:"abstract,omitempty"`
 	Overview   string     `json:"overview,omitempty"`
+	ReferenceCount int    `json:"reference_count,omitempty"`
+	LastReferencedAt *time.Time `json:"last_referenced_at,omitempty"`
 }
 type MemoryMeta struct {
 	Source     string     `json:"source,omitempty"`
@@ -142,7 +144,10 @@ func cleanItems(in []string) []string {
 	for _, v := range in {
 		v = strings.TrimSpace(v)
 		norm := strings.ToLower(strings.Join(strings.Fields(v), " "))
-		if v == "" || len([]rune(v)) > 500 || seen[norm] || strings.Contains(strings.ToLower(v), "api_key") || strings.Contains(strings.ToLower(v), "token=") || strings.Contains(strings.ToLower(v), "authorization:") {
+		lower := strings.ToLower(v)
+		sensitive := strings.Contains(lower, "api_key") || strings.Contains(lower, "token=") || strings.Contains(lower, "authorization:") ||
+			strings.Contains(lower, "bearer ") || (strings.Contains(lower, "sk-") && len([]rune(v)) > 24)
+		if v == "" || len([]rune(v)) > 500 || seen[norm] || sensitive {
 			continue
 		}
 		seen[norm] = true
@@ -375,7 +380,20 @@ func (s *StructuredMemoryStore) Maintain() error {
 		chatChanged := false
 		for i := range m.Records {
 			r := &m.Records[i]
+			staleAfter := memoryStaleAfter
+			if r.ReferenceCount >= 3 {
+				staleAfter = 90 * 24 * time.Hour
+			} else if r.ReferenceCount == 0 {
+				staleAfter = 14 * 24 * time.Hour
+			}
 			if r.Status == "active" && r.ExpiresAt != nil && r.ExpiresAt.Before(now) {
+				r.Status = "archived"
+				r.UpdatedAt = now
+				changed = true
+				chatChanged = true
+				continue
+			}
+			if r.Status == "active" && r.ExpiresAt == nil && !r.UpdatedAt.IsZero() && now.Sub(r.UpdatedAt) >= staleAfter {
 				r.Status = "archived"
 				r.UpdatedAt = now
 				changed = true
@@ -443,7 +461,29 @@ func (s *StructuredMemoryStore) Render(key string) string {
 	return s.RenderRelevant(key, "")
 }
 
+func (s *StructuredMemoryStore) touchReferences(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.data.Chats[key]
+	if m == nil {
+		return
+	}
+	now := time.Now()
+	changed := false
+	for i := range m.Records {
+		if m.Records[i].Status == "active" {
+			m.Records[i].ReferenceCount++
+			m.Records[i].LastReferencedAt = &now
+			changed = true
+		}
+	}
+	if changed {
+		_ = s.saveLocked()
+	}
+}
+
 func (s *StructuredMemoryStore) RenderRelevant(key, query string) string {
+	s.touchReferences(key)
 	m := s.Get(key)
 	activeText := map[string]bool{}
 	for _, r := range m.Records {
