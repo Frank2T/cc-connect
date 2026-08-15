@@ -396,6 +396,7 @@ type Engine struct {
 	dirHistory                   *DirHistory
 	baseWorkDir                  string
 	projectState                 *ProjectStateStore
+	structuredMemory             *StructuredMemoryStore
 
 	// Auto-compress settings
 	autoCompressEnabled   bool
@@ -515,7 +516,7 @@ type interactiveState struct {
 	stopped                  bool
 	pending                  *pendingPermission
 	pendingMessages          []queuedMessage // messages queued while session was busy
-	lastControlMessage       string         // latest interrupt/steer message for status display
+	lastControlMessage       string          // latest interrupt/steer message for status display
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
 	sideText                 string
@@ -741,6 +742,13 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		shellFlag:             defaultShellFlag(),
 		pendingRestartTimeout: defaultPendingRestartTimeout,
 	}
+	memDir := sessionStorePath
+	if memDir == "" {
+		memDir = "."
+	} else {
+		memDir = filepath.Dir(memDir)
+	}
+	e.structuredMemory = NewStructuredMemoryStore(memDir)
 
 	if ag != nil {
 		e.sessions.InvalidateForAgent(ag.Name())
@@ -2968,19 +2976,19 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 			if e.waitForSessionLock(session, recalledStopLockWait) {
 				goto sessionLocked
 			}
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
-		return
-	}
-	// High-priority triage: interrupt and supplement messages are routed to
-	// the running turn immediately (turn/interrupt / turn/steer) instead of
-	// waiting for the current task to finish. Ordinary messages fall through
-	// to the queue below.
-	if e.triageBusyMessage(p, msg, interactiveKey, session, sessions, agent, resolvedWorkspace) {
-		return
-	}
-	// Session is busy — try to queue the message for the running turn
-	// so the agent processes it immediately after the current turn ends.
-	if e.queueMessageForBusySession(p, msg, interactiveKey) {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
+			return
+		}
+		// High-priority triage: interrupt and supplement messages are routed to
+		// the running turn immediately (turn/interrupt / turn/steer) instead of
+		// waiting for the current task to finish. Ordinary messages fall through
+		// to the queue below.
+		if e.triageBusyMessage(p, msg, interactiveKey, session, sessions, agent, resolvedWorkspace) {
+			return
+		}
+		// Session is busy — try to queue the message for the running turn
+		// so the agent processes it immediately after the current turn ends.
+		if e.queueMessageForBusySession(p, msg, interactiveKey) {
 			// Race guard: the drain loop in processInteractiveMessageWith may
 			// have just finished (session unlocked) between our TryLock failure
 			// and the queue append. Re-try TryLock — if it succeeds, no one is
@@ -4829,7 +4837,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 	var lastRichCardLen int
 	var cardMessageID any
 	var partialText string
-	var toolCardMsgID any     // 工具进度卡片句柄 (Telegram 实时更新)
+	var toolCardMsgID any      // 工具进度卡片句柄 (Telegram 实时更新)
 	var toolCardLines []string // 工具进度卡片已追加行
 	triggerAutoCompress := false
 	pendingSend := sendDone
@@ -13928,7 +13936,52 @@ func (e *Engine) cmdMemory(p Platform, msg *Message, args []string) {
 		return
 	}
 
-	sub := matchSubCommand(strings.ToLower(args[0]), []string{"add", "global", "show", "help"})
+	sub := matchSubCommand(strings.ToLower(args[0]), []string{"add", "rule", "pref", "idea", "global", "show", "rules", "prefs", "ideas", "forget", "help"})
+	if sub == "rule" || sub == "pref" || sub == "idea" {
+		if len(args) < 2 {
+			e.reply(p, msg.ReplyCtx, "用法：/memory rule|pref|idea <内容>")
+			return
+		}
+		kind := map[string]string{"rule": "rule", "pref": "pref", "idea": "idea"}[sub]
+		if err := e.structuredMemory.Add(msg.SessionKey, kind, strings.Join(args[1:], " ")); err != nil {
+			e.reply(p, msg.ReplyCtx, "写入结构化记忆失败："+err.Error())
+			return
+		}
+		e.reply(p, msg.ReplyCtx, "已写入结构化记忆。")
+		return
+	}
+	if sub == "rules" || sub == "prefs" || sub == "ideas" {
+		kind := map[string]string{"rules": "rule", "prefs": "pref", "ideas": "idea"}[sub]
+		m := e.structuredMemory.Get(msg.SessionKey)
+		vals := m.DurableRules
+		if kind == "pref" {
+			vals = m.Preferences
+		}
+		if kind == "idea" {
+			vals = m.SkillIdeas
+		}
+		if len(vals) == 0 {
+			e.reply(p, msg.ReplyCtx, "结构化记忆为空。")
+			return
+		}
+		e.reply(p, msg.ReplyCtx, sub+":\n- "+strings.Join(vals, "\n- "))
+		return
+	}
+	if sub == "forget" {
+		if len(args) < 3 {
+			e.reply(p, msg.ReplyCtx, "用法：/memory forget rules|prefs|ideas <编号>")
+			return
+		}
+		n, _ := strconv.Atoi(args[2])
+		kind := map[string]string{"rules": "rule", "prefs": "pref", "ideas": "idea"}[strings.ToLower(args[1])]
+		if kind == "" || n < 1 {
+			e.reply(p, msg.ReplyCtx, "编号或类别无效。")
+			return
+		}
+		_ = e.structuredMemory.Forget(msg.SessionKey, kind, n)
+		e.reply(p, msg.ReplyCtx, "已删除。")
+		return
+	}
 	switch sub {
 	case "add":
 		text := strings.TrimSpace(strings.Join(args[1:], " "))
@@ -16434,8 +16487,14 @@ func (e *Engine) cmdBindSetup(p Platform, msg *Message) {
 // it is included as sender_name so the agent can identify who sent the message
 // by display name (useful in shared channel sessions with multiple users).
 func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionKey, channelKey string) string {
+	var prefix string
+	if e.structuredMemory != nil {
+		if mem := e.structuredMemory.Render(sessionKey); mem != "" {
+			prefix = "[cc-connect structured memory]\n" + mem + "\n[/cc-connect structured memory]\n"
+		}
+	}
 	if !e.injectSender || userID == "" {
-		return content
+		return prefix + content
 	}
 	chatID := channelKey
 	if chatID == "" {
@@ -16443,9 +16502,9 @@ func (e *Engine) buildSenderPrompt(content, userID, userName, platform, sessionK
 	}
 	if userName != "" {
 		safeName := strings.NewReplacer(`"`, `'`, "\n", " ", "\r", "").Replace(userName)
-		return fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
+		return prefix + fmt.Sprintf("[cc-connect sender_id=%s sender_name=\"%s\" platform=%s chat_id=%s]\n%s", userID, safeName, platform, chatID, content)
 	}
-	return fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
+	return prefix + fmt.Sprintf("[cc-connect sender_id=%s platform=%s chat_id=%s]\n%s", userID, platform, chatID, content)
 }
 
 func extractChannelID(sessionKey string) string {

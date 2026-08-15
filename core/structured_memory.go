@@ -1,0 +1,172 @@
+package core
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+)
+
+type StructuredMemory struct {
+	Summary            string    `json:"summary,omitempty"`
+	DurableRules       []string  `json:"durable_rules,omitempty"`
+	Preferences        []string  `json:"preferences,omitempty"`
+	Decisions          []string  `json:"decisions,omitempty"`
+	SkillIdeas         []string  `json:"skill_ideas,omitempty"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	CompactedAt        time.Time `json:"compacted_at"`
+	TurnsSinceCompact  int       `json:"turns_since_compact"`
+	TokensSinceCompact int       `json:"tokens_since_compact"`
+}
+type StructuredMemoryFile struct {
+	Chats map[string]*StructuredMemory `json:"chats"`
+}
+
+type StructuredMemoryStore struct {
+	path string
+	mu   sync.Mutex
+	data StructuredMemoryFile
+}
+
+func NewStructuredMemoryStore(dir string) *StructuredMemoryStore {
+	if strings.TrimSpace(dir) == "" {
+		dir = "."
+	}
+	s := &StructuredMemoryStore{path: filepath.Join(dir, "memory.json"), data: StructuredMemoryFile{Chats: map[string]*StructuredMemory{}}}
+	_ = s.load()
+	return s
+}
+func (s *StructuredMemoryStore) load() error {
+	b, err := os.ReadFile(s.path)
+	if err != nil {
+		return err
+	}
+	var d StructuredMemoryFile
+	if json.Unmarshal(b, &d) != nil {
+		return err
+	}
+	if d.Chats == nil {
+		d.Chats = map[string]*StructuredMemory{}
+	}
+	s.data = d
+	return nil
+}
+func cleanItems(in []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v == "" || len([]rune(v)) > 500 || seen[v] || strings.Contains(strings.ToLower(v), "api_key") || strings.Contains(strings.ToLower(v), "token=") {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	if len(out) > 30 {
+		out = out[len(out)-30:]
+	}
+	return out
+}
+func (s *StructuredMemoryStore) saveLocked() error {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
+		return err
+	}
+	b, _ := json.MarshalIndent(s.data, "", "  ")
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
+}
+func (s *StructuredMemoryStore) Get(key string) StructuredMemory {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.data.Chats[key]
+	if m == nil {
+		return StructuredMemory{}
+	}
+	return *m
+}
+func (s *StructuredMemoryStore) Add(key, kind, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.data.Chats[key]
+	if m == nil {
+		m = &StructuredMemory{}
+		s.data.Chats[key] = m
+	}
+	switch kind {
+	case "rule":
+		m.DurableRules = cleanItems(append(m.DurableRules, text))
+	case "pref":
+		m.Preferences = cleanItems(append(m.Preferences, text))
+	case "idea":
+		m.SkillIdeas = cleanItems(append(m.SkillIdeas, text))
+	case "decision":
+		m.Decisions = cleanItems(append(m.Decisions, text))
+	case "summary":
+		m.Summary = text
+	}
+	m.UpdatedAt = time.Now()
+	return s.saveLocked()
+}
+func (s *StructuredMemoryStore) Forget(key, kind string, n int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.data.Chats[key]
+	if m == nil {
+		return nil
+	}
+	var p *[]string
+	switch kind {
+	case "rule":
+		p = &m.DurableRules
+	case "pref":
+		p = &m.Preferences
+	case "idea":
+		p = &m.SkillIdeas
+	case "decision":
+		p = &m.Decisions
+	}
+	if p != nil && n > 0 && n <= len(*p) {
+		*p = append((*p)[:n-1], (*p)[n:]...)
+	}
+	m.UpdatedAt = time.Now()
+	return s.saveLocked()
+}
+func (s *StructuredMemoryStore) AddTurn(key string, tokens int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.data.Chats[key]
+	if m == nil {
+		m = &StructuredMemory{}
+		s.data.Chats[key] = m
+	}
+	m.TurnsSinceCompact++
+	m.TokensSinceCompact += tokens
+	m.UpdatedAt = time.Now()
+	return s.saveLocked()
+}
+func (s *StructuredMemoryStore) Render(key string) string {
+	m := s.Get(key)
+	var b strings.Builder
+	if m.Summary != "" {
+		b.WriteString("summary: " + m.Summary + "\n")
+	}
+	if len(m.DurableRules) > 0 {
+		b.WriteString("durable rules:\n- " + strings.Join(m.DurableRules, "\n- ") + "\n")
+	}
+	if len(m.Preferences) > 0 {
+		b.WriteString("preferences:\n- " + strings.Join(m.Preferences, "\n- ") + "\n")
+	}
+	if b.Len() > 3500 {
+		return b.String()[:3500]
+	}
+	return b.String()
+}
