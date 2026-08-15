@@ -14035,7 +14035,7 @@ func (e *Engine) cmdMemory(p Platform, msg *Message, args []string) {
 		}
 		result := e.structuredMemory.RenderSearch(msg.SessionKey, q)
 		if result == "" {
-			e.reply(p, msg.ReplyCtx, "没有找到相关记忆。")
+			e.reply(p, msg.ReplyCtx, "没有找到相关记忆。\n提示：这是关键词检索；可改用记忆原文中的词，例如“混合记忆体”“记忆架构”，或发送 /memory rules 查看全部规则。")
 		} else {
 			e.reply(p, msg.ReplyCtx, result)
 		}
