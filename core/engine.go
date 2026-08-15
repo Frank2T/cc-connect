@@ -6467,6 +6467,7 @@ var builtinCommands = []struct {
 	{[]string{"quiet"}, "quiet"},
 	{[]string{"provider"}, "provider"},
 	{[]string{"agent"}, "agent"},
+	{[]string{"profile"}, "profile"},
 	{[]string{"memory"}, "memory"},
 	{[]string{"cron"}, "cron"},
 	{[]string{"timer", "at", "remind"}, "timer"},
@@ -6556,6 +6557,27 @@ func (e *Engine) cmdAgent(p Platform, msg *Message, args []string) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, e.p7Agent.Status(e.AgentTypeName())+"\n已切换，下一轮任务生效。")
+}
+
+// cmdProfile intentionally exposes read-only profile policy for Telegram.
+// Dynamic --profile switching is not wired into exec/app-server sessions yet.
+func (e *Engine) cmdProfile(p Platform, msg *Message, args []string) {
+	if len(args) > 0 && !strings.EqualFold(args[0], "status") {
+		e.reply(p, msg.ReplyCtx, "当前仅支持 `/profile status`，Telegram 暂不支持 Profile 热切换。")
+		return
+	}
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		codexHome = "（由 cc-connect 运行配置提供）"
+	}
+	e.reply(p, msg.ReplyCtx, strings.Join([]string{
+		"Profile 状态（只读）",
+		"当前绑定：Telegram 不绑定 CLI Profile",
+		"权限策略：使用现有 /mode + P7 Agent 角色",
+		"内部可用 Profile：trusted / review / ci（仅 CLI/验收）",
+		"会话规则：未来切换必须新建 /new 会话",
+		"CODEX_HOME：" + codexHome,
+	}, "\n"))
 }
 
 // matchPrefix finds a unique command matching the given prefix.
@@ -6713,6 +6735,8 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdProvider(p, msg, args)
 	case "agent":
 		e.cmdAgent(p, msg, args)
+	case "profile":
+		e.cmdProfile(p, msg, args)
 	case "memory":
 		e.cmdMemory(p, msg, args)
 	case "cron":
