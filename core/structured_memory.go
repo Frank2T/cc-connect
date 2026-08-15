@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,8 @@ type MemoryRecord struct {
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	Status     string     `json:"status"`
 	Tags       []string   `json:"tags,omitempty"`
+	Abstract   string     `json:"abstract,omitempty"`
+	Overview   string     `json:"overview,omitempty"`
 }
 type MemoryMeta struct {
 	Source     string     `json:"source,omitempty"`
@@ -227,7 +230,7 @@ func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 	}
 	if kind != "summary" {
 		m.Metadata[kind+"\x00"+text] = MemoryMeta{Source: "user_or_agent", Confidence: 0.8, UpdatedAt: now}
-		m.Records = append(m.Records, MemoryRecord{ID: kind + "-" + strconv.FormatInt(now.UnixNano(), 10), Kind: kind, Text: text, Scope: "session", Source: "user_or_agent", Confidence: 0.8, CreatedAt: now, UpdatedAt: now, Status: "active"})
+		m.Records = append(m.Records, MemoryRecord{ID: kind + "-" + strconv.FormatInt(now.UnixNano(), 10), Kind: kind, Text: text, Abstract: text, Overview: "用户明确确认的" + kind + "记忆", Scope: "session", Source: "user_or_agent", Confidence: 0.8, CreatedAt: now, UpdatedAt: now, Status: "active"})
 		if len(m.Records) > 120 {
 			m.Records = m.Records[len(m.Records)-120:]
 		}
@@ -244,6 +247,24 @@ func memoryTokens(text string) map[string]bool {
 		}
 	}
 	return out
+}
+
+func memorySimilarity(a, b string) float64 {
+	ta, tb := memoryTokens(a), memoryTokens(b)
+	if len(ta) == 0 || len(tb) == 0 {
+		return 0
+	}
+	hit := 0
+	for t := range ta {
+		if tb[t] {
+			hit++
+		}
+	}
+	union := len(ta) + len(tb) - hit
+	if union == 0 {
+		return 0
+	}
+	return float64(hit) / float64(union)
 }
 
 // Conflicts returns active records of the same kind with substantial token overlap
@@ -406,7 +427,11 @@ func (s *StructuredMemoryStore) RenderRelevant(key, query string) string {
 		b.WriteString("summary: " + m.Summary + "\n")
 	}
 	renderItems := func(kind, title string, items []string) {
-		active := make([]string, 0, len(items))
+		type candidate struct {
+			text  string
+			score float64
+		}
+		active := make([]candidate, 0, len(items))
 		now := time.Now()
 		qtokens := memoryTokens(query)
 		for _, item := range items {
@@ -417,20 +442,19 @@ func (s *StructuredMemoryStore) RenderRelevant(key, query string) string {
 				continue
 			}
 			if len(qtokens) > 0 {
-				hit := 0
-				for t := range memoryTokens(item) {
-					if qtokens[t] {
-						hit++
-					}
-				}
-				if hit == 0 {
+				if memorySimilarity(item, query) == 0 {
 					continue
 				}
 			}
-			active = append(active, item)
+			active = append(active, candidate{text: item, score: memorySimilarity(item, query)})
 		}
 		if len(active) > 0 {
-			b.WriteString(title + ":\n- " + strings.Join(active, "\n- ") + "\n")
+			sort.SliceStable(active, func(i, j int) bool { return active[i].score > active[j].score })
+			lines := make([]string, 0, len(active))
+			for _, c := range active {
+				lines = append(lines, c.text)
+			}
+			b.WriteString(title + ":\n- " + strings.Join(lines, "\n- ") + "\n")
 		}
 	}
 	renderItems("rule", "durable rules", m.DurableRules)
