@@ -3795,6 +3795,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 
 	e.i18n.DetectAndSet(msg.Content)
 	session.AddHistory("user", msg.Content)
+	e.autoExtractStructuredMemory(msg.SessionKey, msg.Content)
 	// Persist user message immediately so crashes between user input and
 	// assistant reply don't lose it (the assistant-side Save below depends
 	// on the turn completing without a process crash).
@@ -3930,6 +3931,43 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if alive {
 		e.startUnsolicitedReader(state, session, sessions, interactiveKey, workspaceDir)
 		e.scheduleAgentSessionIdleClose(interactiveKey, state)
+	}
+}
+
+// autoExtractStructuredMemory records only high-confidence, explicit user statements.
+// Ambiguous chat is intentionally ignored; explicit /memory commands remain available.
+func (e *Engine) autoExtractStructuredMemory(key, content string) {
+	if e.structuredMemory == nil {
+		return
+	}
+	text := strings.TrimSpace(content)
+	if text == "" || strings.HasPrefix(text, "/") {
+		return
+	}
+	type candidate struct{ kind, body string }
+	var found []candidate
+	prefixes := []struct {
+		prefix string
+		kind   string
+	}{
+		{"请记住：", "rule"}, {"记住：", "rule"}, {"以后都", "rule"},
+		{"我的偏好是：", "pref"}, {"我偏好：", "pref"}, {"我喜欢", "pref"},
+		{"决定：", "decision"}, {"我们决定", "decision"},
+		{"技能想法：", "idea"}, {"以后希望：", "idea"},
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(text, p.prefix) {
+			body := strings.TrimSpace(strings.TrimPrefix(text, p.prefix))
+			if len([]rune(body)) >= 2 {
+				found = append(found, candidate{p.kind, body})
+			}
+			break
+		}
+	}
+	for _, c := range found {
+		if err := e.structuredMemory.Add(key, c.kind, c.body); err != nil {
+			slog.Warn("auto memory extract failed", "error", err, "kind", c.kind)
+		}
 	}
 }
 

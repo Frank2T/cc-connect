@@ -149,6 +149,26 @@ func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 	if m.Metadata == nil {
 		m.Metadata = map[string]MemoryMeta{}
 	}
+	// 自动治理：同类且有明显词汇重叠但内容不同的旧记录标记为 conflict，
+	// 新记录保留为 active，避免旧规则与新规则同时伪装成无冲突事实。
+	now := time.Now()
+	for i := range m.Records {
+		r := &m.Records[i]
+		if r.Kind == kind && r.Status == "active" &&
+			!strings.EqualFold(strings.TrimSpace(r.Text), text) {
+			hit := 0
+			want := memoryTokens(text)
+			for t := range memoryTokens(r.Text) {
+				if want[t] {
+					hit++
+				}
+			}
+			if hit >= 2 {
+				r.Status = "conflict"
+				r.UpdatedAt = now
+			}
+		}
+	}
 	switch kind {
 	case "rule":
 		m.DurableRules = cleanItems(append(m.DurableRules, text))
@@ -162,8 +182,7 @@ func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 		m.Summary = text
 	}
 	if kind != "summary" {
-		m.Metadata[kind+"\x00"+text] = MemoryMeta{Source: "user_or_agent", Confidence: 0.8, UpdatedAt: time.Now()}
-		now := time.Now()
+		m.Metadata[kind+"\x00"+text] = MemoryMeta{Source: "user_or_agent", Confidence: 0.8, UpdatedAt: now}
 		m.Records = append(m.Records, MemoryRecord{ID: kind + "-" + strconv.FormatInt(now.UnixNano(), 10), Kind: kind, Text: text, Scope: "session", Source: "user_or_agent", Confidence: 0.8, CreatedAt: now, UpdatedAt: now, Status: "active"})
 		if len(m.Records) > 120 {
 			m.Records = m.Records[len(m.Records)-120:]
