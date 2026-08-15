@@ -53,6 +53,36 @@ type StructuredMemoryStore struct {
 	data StructuredMemoryFile
 }
 
+// Records are the single authoritative store. The legacy arrays are only a
+// derived projection kept for backward-compatible rendering and migration.
+func (m *StructuredMemory) rebuildProjections() {
+	if len(m.Records) == 0 {
+		return
+	}
+	m.DurableRules, m.Preferences, m.Decisions, m.SkillIdeas = nil, nil, nil, nil
+	seen := map[string]bool{}
+	for _, r := range m.Records {
+		if r.Status != "active" {
+			continue
+		}
+		k := r.Kind + "\x00" + r.Text
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		switch r.Kind {
+		case "rule":
+			m.DurableRules = append(m.DurableRules, r.Text)
+		case "pref":
+			m.Preferences = append(m.Preferences, r.Text)
+		case "decision":
+			m.Decisions = append(m.Decisions, r.Text)
+		case "idea":
+			m.SkillIdeas = append(m.SkillIdeas, r.Text)
+		}
+	}
+}
+
 const (
 	memoryMaintenanceInterval = 6 * time.Hour
 	memoryStaleAfter           = 30 * 24 * time.Hour
@@ -83,6 +113,7 @@ func (s *StructuredMemoryStore) load() error {
 			m.Metadata = map[string]MemoryMeta{}
 		}
 		m.migrateRecords()
+		m.rebuildProjections()
 	}
 	s.data = d
 	return nil
@@ -123,6 +154,11 @@ func (s *StructuredMemoryStore) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
 		return err
 	}
+	for _, m := range s.data.Chats {
+		if m != nil {
+			m.rebuildProjections()
+		}
+	}
 	b, _ := json.MarshalIndent(s.data, "", "  ")
 	tmp := s.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0644); err != nil {
@@ -142,6 +178,9 @@ func (s *StructuredMemoryStore) Get(key string) StructuredMemory {
 func (s *StructuredMemoryStore) Add(key, kind, text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
+		return nil
+	}
+	if len(cleanItems([]string{text})) == 0 {
 		return nil
 	}
 	s.mu.Lock()
