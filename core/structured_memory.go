@@ -91,6 +91,8 @@ func (m *StructuredMemory) rebuildProjections() {
 const (
 	memoryMaintenanceInterval = 6 * time.Hour
 	memoryStaleAfter          = 30 * 24 * time.Hour
+	memoryCompactTurns        = 50
+	memoryCompactTokens       = 20000
 )
 
 func NewStructuredMemoryStore(dir string) *StructuredMemoryStore {
@@ -389,6 +391,34 @@ func (s *StructuredMemoryStore) Maintain() error {
 			continue
 		}
 		chatChanged := false
+		// 合并完全重复的 active 记录：保留置信度、引用次数和更新时间
+		// 更高者，较弱者仅标记为 superseded，历史仍可审计。
+		winners := map[string]int{}
+		for i := range m.Records {
+			r := &m.Records[i]
+			if r.Status != "active" {
+				continue
+			}
+			k := r.Kind + "\x00" + strings.ToLower(strings.Join(strings.Fields(r.Text), " "))
+			if prev, ok := winners[k]; ok {
+				p := &m.Records[prev]
+				better := r.Confidence > p.Confidence ||
+					(r.Confidence == p.Confidence && r.ReferenceCount > p.ReferenceCount) ||
+					(r.Confidence == p.Confidence && r.ReferenceCount == p.ReferenceCount && r.UpdatedAt.After(p.UpdatedAt))
+				if better {
+					p.Status = "superseded"
+					p.UpdatedAt = now
+					winners[k] = i
+				} else {
+					r.Status = "superseded"
+					r.UpdatedAt = now
+				}
+				chatChanged = true
+				changed = true
+				continue
+			}
+			winners[k] = i
+		}
 		for i := range m.Records {
 			r := &m.Records[i]
 			staleAfter := memoryStaleAfter
@@ -418,6 +448,22 @@ func (s *StructuredMemoryStore) Maintain() error {
 				changed = true
 				chatChanged = true
 			}
+		}
+		if m.TurnsSinceCompact >= memoryCompactTurns || m.TokensSinceCompact >= memoryCompactTokens {
+			m.CompactedAt = now
+			m.TurnsSinceCompact = 0
+			m.TokensSinceCompact = 0
+			chatChanged = true
+			changed = true
+		}
+		// Records are authoritative; always rebuild legacy projections after
+		// maintenance so archived/superseded entries cannot leak into prompts.
+		before := strings.Join(m.DurableRules, "\x00") + "|" + strings.Join(m.Preferences, "\x00") + "|" + strings.Join(m.Decisions, "\x00") + "|" + strings.Join(m.SkillIdeas, "\x00")
+		m.rebuildProjections()
+		after := strings.Join(m.DurableRules, "\x00") + "|" + strings.Join(m.Preferences, "\x00") + "|" + strings.Join(m.Decisions, "\x00") + "|" + strings.Join(m.SkillIdeas, "\x00")
+		if before != after {
+			chatChanged = true
+			changed = true
 		}
 		if chatChanged {
 			m.UpdatedAt = now

@@ -88,7 +88,11 @@ func prependCodexPromptPreamble(prompt string, preamble string) string {
 	return "Before answering, follow these project-level instructions for this cc-connect session. They are not user content.\n\n" + preamble + "\n\n---\n\nUser message:\n" + prompt
 }
 
-func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string, visionCfg core.VisionSettings) (*codexSession, error) {
+func newCodexSession(ctx context.Context, cliBin string, cliExtraArgs []string, workDir, model, effort, mode, resumeID, baseURL string, extraEnv []string, modelProvider string, systemPrompt string, appendPrompt string, visionCfgs ...core.VisionSettings) (*codexSession, error) {
+	var visionCfg core.VisionSettings
+	if len(visionCfgs) > 0 {
+		visionCfg = visionCfgs[0]
+	}
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	cs := &codexSession{

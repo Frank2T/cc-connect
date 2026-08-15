@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStructuredMemoryIsolationAndPersistence(t *testing.T) {
@@ -47,5 +48,53 @@ func TestStructuredMemorySearchReadableOutput(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("search output missing %q: %s", want, out)
 		}
+	}
+}
+
+func TestStructuredMemoryMaintainDeduplicatesAndRebuildsProjection(t *testing.T) {
+	s := NewStructuredMemoryStore(t.TempDir())
+	_ = s.Add("k", "rule", "保持中文回答")
+	s.mu.Lock()
+	m := s.data.Chats["k"]
+	now := time.Now()
+	m.Records = append(m.Records, MemoryRecord{
+		ID: "dup", Kind: "rule", Text: "保持中文回答", Confidence: 0.2,
+		CreatedAt: now, UpdatedAt: now, Status: "active",
+	})
+	m.DurableRules = []string{"保持中文回答", "已归档旧规则"}
+	s.mu.Unlock()
+	if err := s.Maintain(); err != nil {
+		t.Fatal(err)
+	}
+	got := s.Get("k")
+	if len(got.DurableRules) != 1 || got.DurableRules[0] != "保持中文回答" {
+		t.Fatalf("projection not rebuilt: %#v", got.DurableRules)
+	}
+	active := 0
+	for _, r := range got.Records {
+		if r.Kind == "rule" && r.Status == "active" {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("expected one active duplicate winner, got %d", active)
+	}
+}
+
+func TestStructuredMemoryMaintainCompactsCounters(t *testing.T) {
+	s := NewStructuredMemoryStore(t.TempDir())
+	for i := 0; i < memoryCompactTurns; i++ {
+		_ = s.AddTurn("k", memoryCompactTokens/memoryCompactTurns)
+	}
+	before := s.Get("k")
+	if before.TurnsSinceCompact == 0 || before.TokensSinceCompact == 0 {
+		t.Fatal("turn counters not recorded")
+	}
+	if err := s.Maintain(); err != nil {
+		t.Fatal(err)
+	}
+	after := s.Get("k")
+	if after.TurnsSinceCompact != 0 || after.TokensSinceCompact != 0 || after.CompactedAt.IsZero() {
+		t.Fatalf("compaction not recorded: %+v", after)
 	}
 }

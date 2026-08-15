@@ -205,7 +205,11 @@ const (
 	appServerControlTimeout = 30 * time.Second
 )
 
-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, visionCfg core.VisionSettings) (*appServerSession, error) {
+func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string, visionCfgs ...core.VisionSettings) (*appServerSession, error) {
+	var visionCfg core.VisionSettings
+	if len(visionCfgs) > 0 {
+		visionCfg = visionCfgs[0]
+	}
 	sessionCtx, cancel := context.WithCancel(ctx)
 	s := &appServerSession{
 		url:              url,
