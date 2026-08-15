@@ -269,6 +269,17 @@ func memoryTokens(text string) map[string]bool {
 		if len([]rune(part)) >= 2 {
 			out[part] = true
 		}
+		// Keep short Chinese fragments searchable even when the user does not
+		// type spaces. Add CJK unigrams and bigrams alongside the full phrase.
+		runes := []rune(part)
+		for i, r := range runes {
+			if unicode.Is(unicode.Han, r) {
+				out[string(r)] = true
+				if i+1 < len(runes) && unicode.Is(unicode.Han, runes[i+1]) {
+					out[string(r)+string(runes[i+1])] = true
+				}
+			}
+		}
 	}
 	return out
 }
