@@ -366,7 +366,6 @@ func readCodexCachedModels() []core.ModelOption {
 	return parseCodexModelsJSON(b)
 }
 
-
 // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
 // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
 // It is shared by readCodexCachedModels and readCodexModelCatalog.
@@ -411,7 +410,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
 	}
 	return models
 }
-
 
 // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
 // model_catalog_json setting, then reads and parses that JSON file.
@@ -505,6 +503,17 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	provName, provAPIKey, provWireAPI, provHeaders := a.activeProviderCodexConfig()
 	a.mu.Unlock()
 
+	// P7 role instructions are isolated in the cc-connect Codex Home and are
+	// injected only when a new session is created. Resumed threads retain their
+	// existing context and therefore are not rewritten.
+	if rolePrompt := loadP7RolePrompt(codexHome); rolePrompt != "" {
+		if strings.TrimSpace(appendPrompt) == "" {
+			appendPrompt = rolePrompt
+		} else {
+			appendPrompt += "\n\n" + rolePrompt
+		}
+	}
+
 	if provName != "" {
 		if err := ensureCodexProviderConfig(codexHome, provName, baseURL, provWireAPI, provHeaders); err != nil {
 			slog.Warn("codex: failed to write provider config", "provider", provName, "error", err)
@@ -522,6 +531,37 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
 	}
 
 	return newCodexSession(ctx, cliBin, cliExtraArgs, workDir, model, reasoningEffort, mode, sessionID, baseURL, extraEnv, provName, systemPrompt, appendPrompt, visionCfg)
+}
+
+func loadP7RolePrompt(codexHome string) string {
+	codexHome = strings.TrimSpace(codexHome)
+	if codexHome == "" {
+		codexHome = os.Getenv("CODEX_HOME")
+	}
+	if codexHome == "" {
+		return ""
+	}
+	statePath := filepath.Join(codexHome, ".codex", "agent-state.json")
+	b, err := os.ReadFile(statePath)
+	if err != nil {
+		return ""
+	}
+	var state struct {
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(b, &state) != nil {
+		return ""
+	}
+	role := strings.ToLower(strings.TrimSpace(state.Role))
+	if role != "explorer" && role != "worker" && role != "reviewer" {
+		return ""
+	}
+	rolePath := filepath.Join(codexHome, ".codex", "agents", role+".toml")
+	roleBytes, err := os.ReadFile(rolePath)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("Selected Codex role: %s\n\nRole configuration:\n%s", role, strings.TrimSpace(string(roleBytes)))
 }
 
 func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error) {
